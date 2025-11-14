@@ -1,0 +1,16 @@
+{
+  "name": "discord-magiceden-tracker",
+  "short_name": "discord-magiceden-tracker",
+  "description": "simple node.js project to track sell/buy/listings from magiceden, sending notifications to discord",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "32x32",
+      "type": "image/x-icon"
+    }
+  ]
+}
