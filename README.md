@@ -146,8 +146,8 @@ You can set a minimum rarity for each collection in `data/tracks.json` using the
 ```json
 {
   "collections": {
-    "great__goats": {
-      "max_price": 0.4,
+    "y00ts": {
+      "max_price": 3.2,
       "min_rarity": "Legendary"
     }
   }
