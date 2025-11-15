@@ -1,6 +1,23 @@
 const fs = require("fs");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { REST, Routes, SlashCommandBuilder } = require("discord.js");
+// ANSI color codes for console logs
+const colors = {
+  reset: "\x1b[0m",
+  green: "\x1b[32m",
+  red: "\x1b[31m",
+  yellow: "\x1b[33m",
+  cyan: "\x1b[36m",
+  gray: "\x1b[90m",
+  magenta: "\x1b[35m",
+};
+
+// Colorized log function
+function colorLog(message, color = "reset") {
+  const colorCode = colors[color] || colors.reset;
+  console.log(`${colorCode}${message}${colors.reset}`);
+}
+
 let fetch;
 try {
   fetch = (...args) =>
@@ -14,7 +31,7 @@ let config = {};
 try {
   config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
 } catch (e) {
-  console.error("Could not read config.json. Please create it.");
+  colorLog("Could not read config.json. Please create it.", "red");
   process.exit(1);
 }
 
@@ -31,9 +48,107 @@ const TRACKS_PATH = "./data/tracks.json";
 const POLL_INTERVAL_SECONDS = parseInt(config.POLL_INTERVAL_SECONDS || "2", 10);
 const OWNER_ID = config.OWNER_ID;
 
+// Magic Eden/HowRare rarity tiers and color chart (as provided by user)
+const RARITY_COLORS = {
+  Mythic: "#ff4747", // Red
+  Legendary: "#ff9900", // Orange
+  Epic: "#a259ff", // Purple
+  Rare: "#0099ff", // Blue
+  Uncommon: "#00e599", // Green
+  Common: "#b0b8c1", // Gray
+};
+
+function getRarityTier(rank, supply) {
+  if (!rank || !supply || isNaN(rank) || isNaN(supply)) return "Common";
+  const p = rank / supply;
+  if (p <= 0.01) return "Mythic";
+  if (p <= 0.05) return "Legendary";
+  if (p <= 0.15) return "Epic";
+  if (p <= 0.35) return "Rare";
+  if (p <= 0.7) return "Uncommon";
+  return "Common";
+}
+
 // To avoid spamming the same item over and over:
 let seenListingIds = new Set();
 
+// Cache for collection supplies
+let collectionSupplies = {};
+
+// Cache for HowRare collection data (mint -> rank)
+let howRareCache = {};
+
+// Mapping of Magic Eden symbols to HowRare collection slugs
+const ME_TO_HOWRARE = {
+  great__goats: "greatgoats",
+  undead_genesis: "undeadgenesis",
+  candies: "candies",
+  // Add more mappings as needed
+};
+
+// Import fetchCollectionSupply
+const { fetchCollectionSupply } = require("./fetchCollectionSupply");
+
+// Fetch and cache supply for all tracked collections at startup
+async function cacheAllCollectionSupplies() {
+  try {
+    const raw = fs.readFileSync(TRACKS_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    const collections = parsed.collections || {};
+    const symbols = Object.keys(collections);
+    for (const symbol of symbols) {
+      console.log(`[DEBUG] Starting supply check for collection: ${symbol}`);
+      // First try to get supply from HowRare (faster and more reliable)
+      console.log(`[DEBUG] Fetching HowRare data for ${symbol}...`);
+      const howRareSupply = await cacheHowRareCollection(symbol);
+      if (howRareSupply) {
+        console.log(
+          `[DEBUG] Got HowRare supply for ${symbol}: ${howRareSupply}`
+        );
+      } else {
+        console.log(`[DEBUG] No HowRare supply for ${symbol}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      // If HowRare didn't provide supply, fallback directly to config.json override
+      if (!collectionSupplies[symbol]) {
+        console.log(`[DEBUG] Attempting config override for ${symbol}`);
+        try {
+          if (
+            config &&
+            config.supply_overrides &&
+            typeof config.supply_overrides[symbol] === "number"
+          ) {
+            collectionSupplies[symbol] = config.supply_overrides[symbol];
+            colorLog(
+              `[SUPPLY] Using config override for ${symbol}: ${config.supply_overrides[symbol]}`,
+              "yellow"
+            );
+          } else {
+            colorLog(
+              `[SUPPLY] No config override found for ${symbol}, skipping this collection.`,
+              "magenta"
+            );
+            console.log(
+              `[DEBUG] Skipping collection due to missing supply: ${symbol}`
+            );
+            continue;
+          }
+        } catch (e) {
+          colorLog(
+            `[SUPPLY] Error reading config override for ${symbol}: ${e}. Skipping this collection.`,
+            "red"
+          );
+          console.log(`[DEBUG] Skipping collection due to error: ${symbol}`);
+          continue;
+        }
+        console.log(`[DEBUG] Finished supply check for collection: ${symbol}`);
+      }
+    }
+  } catch (err) {
+    console.log(`Error caching collection supplies: ${err}`);
+  }
+}
 // --- GLOBAL ROUND-ROBIN LIMITER FOR COLLECTION POLLING ---
 const TICK_MS = config.ROUND_ROBIN_TICK_MS || 550; // ~1.8 requests per second
 let roundRobinIdx = 0;
@@ -49,7 +164,7 @@ async function indexCurrentListings() {
     const collections = parsed.collections || {};
     const symbols = Object.keys(collections);
     for (const symbol of symbols) {
-      const listings = await fetchListings(symbol);
+      const listings = await fetchLatestListings(symbol);
       for (const listing of listings) {
         const id = listing.tokenMint || listing.id || JSON.stringify(listing);
         seenListingIds.add(id);
@@ -57,7 +172,7 @@ async function indexCurrentListings() {
     }
     console.log("Indexed current listings at startup.");
   } catch (err) {
-    console.error("Error indexing current listings:", err);
+    console.log(`Error indexing current listings: ${err}`);
   }
 }
 
@@ -65,10 +180,8 @@ async function fetchListings(symbol) {
   if (!symbol) return [];
   const url = `https://api-mainnet.magiceden.dev/v2/collections/${encodeURIComponent(
     symbol
-  )}/listings?offset=0&limit=20`;
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" },
-  });
+  )}/activities?limit=40`;
+  let res = await fetch(url, { headers: { Accept: "application/json" } });
   if (res.status === 429) {
     console.error(
       `[DEBUG] Magic Eden API throttled (429) for symbol: ${symbol}`
@@ -77,7 +190,7 @@ async function fetchListings(symbol) {
   }
   if (!res.ok) {
     console.error(
-      `Error fetching listings for ${symbol}:`,
+      `Error fetching activities for ${symbol}:`,
       res.status,
       await res.text()
     );
@@ -85,17 +198,17 @@ async function fetchListings(symbol) {
   }
   const data = await res.json();
   if (!Array.isArray(data)) return [];
-  return data;
+  // Only keep 'list' activities (new listings)
+  return data.filter((activity) => activity.type === "list");
 }
 
 // Wrap fetchListings to throw on 429
 async function fetchListingsWithBackoff(symbol) {
+  if (!symbol) return [];
   const url = `https://api-mainnet.magiceden.dev/v2/collections/${encodeURIComponent(
     symbol
-  )}/listings?offset=0&limit=20`;
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" },
-  });
+  )}/activities?limit=40`;
+  let res = await fetch(url, { headers: { Accept: "application/json" } });
   if (res.status === 429) {
     const err = new Error("HTTP 429");
     err.is429 = true;
@@ -103,7 +216,7 @@ async function fetchListingsWithBackoff(symbol) {
   }
   if (!res.ok) {
     console.error(
-      `Error fetching listings for ${symbol}:`,
+      `Error fetching activities for ${symbol}:`,
       res.status,
       await res.text()
     );
@@ -111,7 +224,102 @@ async function fetchListingsWithBackoff(symbol) {
   }
   const data = await res.json();
   if (!Array.isArray(data)) return [];
-  return data;
+  return data.filter((activity) => activity.type === "list");
+}
+
+// Alias for compatibility with previous code
+const fetchLatestListings = fetchListings;
+const fetchLatestListingsWithBackoff = fetchListingsWithBackoff;
+
+// Fetch token metadata for a specific tokenMint
+async function fetchTokenMetadata(tokenMint) {
+  if (!tokenMint) return null;
+  try {
+    const url = `https://api-mainnet.magiceden.dev/v2/tokens/${encodeURIComponent(
+      tokenMint
+    )}`;
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) {
+      console.error(
+        `Error fetching token metadata for ${tokenMint}:`,
+        res.status
+      );
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.error(`Exception fetching token metadata for ${tokenMint}:`, err);
+    return null;
+  }
+}
+
+// Fetch and cache entire HowRare collection data
+async function cacheHowRareCollection(meSymbol) {
+  const howRareSlug = ME_TO_HOWRARE[meSymbol];
+  if (!howRareSlug) {
+    console.log(
+      `${colors.magenta}[HOWRARE] No HowRare mapping for ${meSymbol}${colors.reset}`
+    );
+    return null;
+  }
+
+  if (howRareCache[meSymbol]) {
+    console.log(
+      `${colors.magenta}[HOWRARE] ${meSymbol} already cached${colors.reset}`
+    );
+    return collectionSupplies[meSymbol] || null;
+  }
+
+  try {
+    console.log(
+      `${colors.magenta}[HOWRARE] Fetching collection data for ${howRareSlug}...${colors.reset}`
+    );
+    const url = `https://api.howrare.is/v0.1/collections/${howRareSlug}`;
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) {
+      console.log(
+        `${colors.magenta}[HOWRARE] Error fetching ${howRareSlug}: ${res.status}${colors.reset}`
+      );
+      return null;
+    }
+    const data = await res.json();
+    const items = data?.result?.data?.items || [];
+
+    // Build mint -> rank mapping
+    const cache = {};
+    for (const item of items) {
+      if (item.mint && item.rank) {
+        cache[item.mint] = item.rank;
+      }
+    }
+
+    howRareCache[meSymbol] = cache;
+    const totalItems = Object.keys(cache).length;
+    console.log(
+      `${colors.magenta}[HOWRARE] Cached ${totalItems} items for ${meSymbol}${colors.reset}`
+    );
+
+    // Also cache the supply from HowRare
+    if (totalItems > 0 && !collectionSupplies[meSymbol]) {
+      collectionSupplies[meSymbol] = totalItems;
+      console.log(
+        `${colors.yellow}[SUPPLY] Using HowRare supply for ${meSymbol}: ${totalItems}${colors.reset}`
+      );
+    }
+
+    return totalItems;
+  } catch (err) {
+    console.log(
+      `${colors.magenta}[HOWRARE] Exception fetching ${howRareSlug}: ${err}${colors.reset}`
+    );
+    return null;
+  }
+}
+
+// Get HowRare rank from cache
+function getHowRareRank(meSymbol, tokenMint) {
+  if (!tokenMint || !howRareCache[meSymbol]) return null;
+  return howRareCache[meSymbol][tokenMint] || null;
 }
 
 async function checkListingsAndNotify() {
@@ -123,19 +331,20 @@ async function checkListingsAndNotify() {
       const parsed = JSON.parse(raw);
       collections = parsed.collections || {};
     } catch (e) {
-      console.log(
-        "No collections to track or error reading tracks.json. Bot is idling."
+      colorLog(
+        "No collections to track or error reading tracks.json. Bot is idling.",
+        "gray"
       );
       return;
     }
     const symbols = Object.keys(collections);
     if (!symbols.length) {
-      console.log("No collections to track. Bot is idling.");
+      colorLog("No collections to track. Bot is idling.", "gray");
       return;
     }
     const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
     if (!channel) {
-      console.error("Channel not found. Check DISCORD_CHANNEL_ID.");
+      colorLog("Channel not found. Check DISCORD_CHANNEL_ID.", "red");
       return;
     }
     for (const symbol of symbols) {
@@ -143,7 +352,7 @@ async function checkListingsAndNotify() {
       console.log(
         `Checking listings for ${symbol} (max price: ${maxPrice})...`
       );
-      const listings = await fetchListings(symbol);
+      const listings = await fetchLatestListings(symbol);
       if (!listings.length) {
         console.log(`No listings returned for ${symbol}.`);
         continue;
@@ -168,9 +377,13 @@ async function checkListingsAndNotify() {
           null;
         if (!name) {
           // Log the full listing for debugging if name is missing
-          console.warn(
-            "[WARN] Listing missing all name fields:",
-            JSON.stringify(listing, null, 2)
+          colorLog(
+            `[WARN] Listing missing all name fields: ${JSON.stringify(
+              listing,
+              null,
+              2
+            )}`,
+            "magenta"
           );
           name = "Unknown NFT";
         }
@@ -239,11 +452,12 @@ async function checkListingsAndNotify() {
           embed.image = { url: imageUrl };
         }
         await channel.send({ embeds: [embed] });
-        console.log(`Sent alert for listing: ${id} (${symbol})`);
+        // Colorize new listing log in green
+        colorLog(`Sent alert for listing: ${id} (${symbol})`, "green");
       }
     }
   } catch (err) {
-    console.error("Error in checkListingsAndNotify:", err);
+    console.log(`Error in checkListingsAndNotify: ${err}`);
   }
 }
 
@@ -294,121 +508,94 @@ async function registerSlashCommands() {
     );
     console.log("Slash commands registered!");
   } catch (err) {
-    console.error("Failed to register slash commands:", err);
+    console.log("Failed to register slash commands: " + err);
   }
 }
 
 client.once("ready", () => {
-  console.log(`Logged in as ${client.user.tag}`);
-  registerSlashCommands();
-  // DEBUG: Post the first listing as an embed and auto-delete after 5s (for testing)
   (async () => {
+    console.log(`Logged in as ${client.user.tag}`);
+    await registerSlashCommands();
+    console.log('[DEBUG] Finished registering slash commands.');
+    await cacheAllCollectionSupplies();
+    console.log('[DEBUG] Finished caching all collection supplies.');
+    // DEBUG: Post the first real listing as an embed and auto-delete after 5s (for testing)
     try {
+      const debugChannel = await client.channels.fetch(DISCORD_CHANNEL_ID);
       const raw = fs.readFileSync(TRACKS_PATH, "utf8");
       const parsed = JSON.parse(raw);
       const collections = parsed.collections || {};
       const symbols = Object.keys(collections);
       if (!symbols.length) return;
       const symbol = symbols[0];
-      const listings = await fetchListings(symbol);
+      const listings = await fetchLatestListings(symbol);
       if (!listings.length) return;
-      const listing = listings[0];
-      // Debug: print the full listing object to console
-      console.log(
-        "DEBUG: First listing object:",
-        JSON.stringify(listing, null, 2)
-      );
-      const price =
-        listing.price || listing.priceSol || listing.buyNowPrice || 0;
-      let name =
-        listing.name ||
-        listing.title ||
-        (listing.extra && (listing.extra.name || listing.extra.title)) ||
-        (listing.token && (listing.token.name || listing.token.title)) ||
-        (listing.metadata &&
-          (listing.metadata.name || listing.metadata.title)) ||
-        null;
-      if (!name) {
-        // Log the full listing for debugging if name is missing
-        console.warn(
-          "[WARN] DEBUG listing missing all name fields:",
-          JSON.stringify(listing, null, 2)
+      for (let i = 0; i < Math.min(3, listings.length); i++) {
+        const listing = listings[i];
+        // Debug: print the full listing object to console
+        console.log(
+          `DEBUG: Listing #${i + 1} object: ${JSON.stringify(listing, null, 2)}`
         );
-        name = "Unknown NFT";
-      }
-      // Only extract howrare rarity fields if present, including nested rarity fields
-      let howrare =
-        (listing.rarity &&
-          listing.rarity.howrare &&
-          listing.rarity.howrare.rank) ||
-        (listing.extra &&
-          (listing.extra.howrare_rank ||
-            (listing.extra.howrare && listing.extra.howrare.rank) ||
-            listing.extra.howrare)) ||
-        listing.howrare_rank ||
-        (listing.howrare && listing.howrare.rank) ||
-        listing.howrare ||
-        (listing.token &&
-          (listing.token.howrare_rank ||
-            (listing.token.howrare && listing.token.howrare.rank) ||
-            listing.token.howrare)) ||
-        (listing.metadata &&
-          (listing.metadata.howrare_rank ||
-            (listing.metadata.howrare && listing.metadata.howrare.rank) ||
-            listing.metadata.howrare)) ||
-        null;
-      const link =
-        listing.marketplaceLink ||
-        listing.listingURL ||
-        `https://magiceden.io/item-details/${listing.tokenMint || ""}`;
-      let imageUrl = null;
-      if (listing.extra && listing.extra.img) {
-        imageUrl = listing.extra.img;
-      } else if (listing.token && listing.token.image) {
-        imageUrl = listing.token.image;
-      } else if (listing.img) {
-        imageUrl = listing.img;
-      } else if (listing.image) {
-        imageUrl = listing.image;
-      } else if (listing.extra && listing.extra.image) {
-        imageUrl = listing.extra.image;
-      } else if (
-        listing.token &&
-        listing.token.properties &&
-        Array.isArray(listing.token.properties.files)
-      ) {
-        const file = listing.token.properties.files.find(
-          (f) => f.type && f.type.startsWith("image/") && f.uri
+        // Fetch token metadata from the token endpoint
+        const tokenMint = listing.tokenMint || listing.mint;
+        console.log(`[DEBUG] Fetching token metadata for ${tokenMint}...`);
+        const tokenData = tokenMint
+          ? await fetchTokenMetadata(tokenMint)
+          : null;
+        console.log(
+          `[DEBUG] Token data: ${
+            tokenData ? JSON.stringify(tokenData, null, 2) : "null"
+          }`
         );
-        if (file) imageUrl = file.uri;
+
+        const price = listing.price || 0; // Already in SOL
+        let name = tokenData?.name || "Unknown NFT";
+
+        // Get rarity rank from cached HowRare data
+        let howrare = getHowRareRank(symbol, tokenMint);
+        // Print HowRare prefix in magenta, rank in yellow
+        console.log(
+          `${colors.magenta}[HOWRARE] HowRare rank for ${tokenMint}: ${colors.yellow}${howrare}${colors.magenta}${colors.reset}`
+        );
+        const link = `https://magiceden.io/item-details/${tokenMint || ""}`;
+        let imageUrl =
+          listing.image || tokenData?.image || tokenData?.img || null;
+
+        // Use cached supply for rarity tier
+        let supply = collectionSupplies[symbol] || null;
+        let rankNum = Number(howrare);
+        let rarityTier = getRarityTier(rankNum, supply);
+        let rarityColor = RARITY_COLORS[rarityTier] || "#9b59ff";
+        const embed = {
+          title: `DEBUG: Listing #${i + 1} for ${symbol} (auto-deletes in 5s)`,
+          description: [
+            `Name: **${name}**`,
+            `Price: **${price} SOL**`,
+            howrare !== null && !isNaN(rankNum) && supply
+              ? `HowRare: **${howrare}** (${rarityTier})`
+              : howrare !== null
+              ? `HowRare: **${howrare}**`
+              : null,
+            `Link: ${link}`,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          url: link,
+          color: parseInt(rarityColor.replace("#", ""), 16),
+        };
+        if (imageUrl) {
+          embed.image = { url: imageUrl };
+        }
+        const msg = await debugChannel.send({ embeds: [embed] });
+        setTimeout(() => msg.delete().catch(() => {}), 5000);
       }
-      const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
-      const embed = {
-        title: `DEBUG: First listing for ${symbol} (auto-deletes in 5s)`,
-        description: [
-          `Name: **${name}**`,
-          `Price: **${price} SOL**`,
-          howrare !== null ? `HowRare: **${howrare}**` : null,
-          `Link: ${link}`,
-        ]
-          .filter(Boolean)
-          .join("\n"),
-        url: link,
-        color: 0x9b59ff, // Magic Eden purple accent
-      };
-      if (imageUrl) {
-        embed.image = { url: imageUrl };
-      }
-      const msg = await channel.send({ embeds: [embed] });
-      setTimeout(() => msg.delete().catch(() => {}), 5000);
     } catch (err) {
-      console.error("DEBUG fetch error:", err);
+      console.log(`DEBUG fetch error: ${err}`);
     }
-  })();
-  // Always index all current listings at startup to avoid spam
-  indexCurrentListings().then(() => {
+    // Always index all current listings at startup to avoid spam
+    await indexCurrentListings();
     startRoundRobinPolling();
-  });
+  })();
 });
 
 // Start the global round-robin polling
@@ -435,11 +622,18 @@ async function pollNextCollectionRoundRobin() {
   if (Date.now() < globalBackoffUntil) return;
   // Pick next collection
   const symbol = symbols[roundRobinIdx % symbols.length];
-  console.log(`[Polling] Checking collection: ${symbol}`);
-  roundRobinIdx = (roundRobinIdx + 1) % symbols.length;
   const maxPrice = Number(collections[symbol].max_price) || Infinity;
+  // Placeholder for future filter options (rarity, etc.)
+  const filterOptions = [`maxPrice: ${maxPrice}`];
+  // Add more filter options here as needed (e.g., rarity)
+  console.log(
+    `[Polling] Checking collection: ${symbol} (${filterOptions.join(", ")})`
+  );
+  roundRobinIdx = (roundRobinIdx + 1) % symbols.length;
+  // Use cached supply for rarity math
+  const supply = collectionSupplies[symbol] || null;
   try {
-    const listings = await fetchListingsWithBackoff(symbol);
+    const listings = await fetchLatestListingsWithBackoff(symbol);
     if (!listings.length) return;
     const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
     for (const listing of listings) {
@@ -451,93 +645,68 @@ async function pollNextCollectionRoundRobin() {
       if (!Number.isFinite(priceNum)) continue;
       if (priceNum > maxPrice) continue;
       seenListingIds.add(id);
-      let name =
-        listing.name ||
-        listing.title ||
-        (listing.extra && (listing.extra.name || listing.extra.title)) ||
-        (listing.token && (listing.token.name || listing.token.title)) ||
-        (listing.metadata &&
-          (listing.metadata.name || listing.metadata.title)) ||
-        null;
-      if (!name) {
-        name = "Unknown NFT";
-      }
-      let howrare =
-        (listing.rarity &&
-          listing.rarity.howrare &&
-          listing.rarity.howrare.rank) ||
-        (listing.extra &&
-          (listing.extra.howrare_rank ||
-            (listing.extra.howrare && listing.extra.howrare.rank) ||
-            listing.extra.howrare)) ||
-        listing.howrare_rank ||
-        (listing.howrare && listing.howrare.rank) ||
-        listing.howrare ||
-        (listing.token &&
-          (listing.token.howrare_rank ||
-            (listing.token.howrare && listing.token.howrare.rank) ||
-            listing.token.howrare)) ||
-        (listing.metadata &&
-          (listing.metadata.howrare_rank ||
-            (listing.metadata.howrare && listing.metadata.howrare.rank) ||
-            listing.metadata.howrare)) ||
-        null;
-      const link =
-        listing.marketplaceLink ||
-        listing.listingURL ||
-        `https://magiceden.io/item-details/${listing.tokenMint || ""}`;
-      // Robust image URL extraction
-      let imageUrl = null;
-      if (listing.extra && listing.extra.img) {
-        imageUrl = listing.extra.img;
-      } else if (listing.token && listing.token.image) {
-        imageUrl = listing.token.image;
-      } else if (listing.img) {
-        imageUrl = listing.img;
-      } else if (listing.image) {
-        imageUrl = listing.image;
-      } else if (listing.extra && listing.extra.image) {
-        imageUrl = listing.extra.image;
-      } else if (
-        listing.token &&
-        listing.token.properties &&
-        Array.isArray(listing.token.properties.files)
-      ) {
-        const file = listing.token.properties.files.find(
-          (f) => f.type && f.type.startsWith("image/") && f.uri
-        );
-        if (file) imageUrl = file.uri;
-      }
+
+      // Fetch token metadata to get name and image
+      const tokenMint = listing.tokenMint || listing.mint;
+      console.log(`[DEBUG] Fetching token metadata for ${tokenMint}...`);
+      const tokenData = tokenMint ? await fetchTokenMetadata(tokenMint) : null;
+      console.log(
+        `[DEBUG] Token data: ${
+          tokenData ? JSON.stringify(tokenData, null, 2) : "null"
+        }`
+      );
+
+      let name = tokenData?.name || "Unknown NFT";
+
+      // Get rarity rank from cached HowRare data
+      let howrare = getHowRareRank(symbol, tokenMint);
+      // Print HowRare prefix in magenta, rank in yellow
+      console.log(
+        `${colors.magenta}[HOWRARE] HowRare rank for ${tokenMint}: ${colors.yellow}${howrare}${colors.magenta}${colors.reset}`
+      );
+      let rankNum = Number(howrare);
+      let rarityTier = getRarityTier(rankNum, supply);
+      let rarityColor = RARITY_COLORS[rarityTier] || "#9b59ff";
+      const link = `https://magiceden.io/item-details/${tokenMint || ""}`;
+      let imageUrl =
+        listing.image || tokenData?.image || tokenData?.img || null;
       const embed = {
         title: `New listing in ${symbol}!`,
         description: [
           `Name: **${name}**`,
           `Price: **${priceNum} SOL** (<= ${maxPrice} SOL)`,
-          moonrank !== null ? `Moonrank: **${moonrank}**` : null,
-          howrare !== null ? `HowRare: **${howrare}**` : null,
+          howrare !== null && !isNaN(rankNum) && supply
+            ? `HowRare: **${howrare}** (${rarityTier})`
+            : howrare !== null
+            ? `HowRare: **${howrare}**`
+            : null,
           `Link: ${link}`,
         ]
           .filter(Boolean)
           .join("\n"),
         url: link,
-        color: 0x9b59ff,
+        color: parseInt(rarityColor.replace("#", ""), 16),
       };
       if (imageUrl) embed.image = { url: imageUrl };
       await channel.send({ embeds: [embed] });
-      console.log(`Sent alert for listing: ${id} (${symbol})`);
+      // Colorize new listing log in green
+      colorLog(`Sent alert for listing: ${id} (${symbol})`, "green");
     }
   } catch (err) {
     if (err && err.is429) {
       // Backoff for BACKOFF_MS and increase tick interval for safety
       globalBackoffUntil = Date.now() + BACKOFF_MS;
       dynamicTickMs = Math.min(dynamicTickMs + 100, 2000); // Cap at 2s
-      console.error(
-        `[BACKOFF] 429 detected, pausing all polling for ${
-          BACKOFF_MS / 1000
-        }s, tick now ${dynamicTickMs}ms`
-      );
+      const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+      const msg = `[BACKOFF] Magic Eden API rate limit hit (429). Pausing all polling for ${
+        BACKOFF_MS / 1000
+      }s. Slowing down to ${dynamicTickMs}ms per collection.`;
+      if (channel) {
+        channel.send(msg).catch(() => {});
+      }
+      console.log(msg);
     } else {
-      console.error("Error in round-robin polling:", err);
+      console.log(`Error in round-robin polling: ${err}`);
     }
   }
 }
@@ -546,7 +715,7 @@ function reloadConfig() {
   try {
     config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
   } catch (e) {
-    console.error("Could not reload config.json:", e);
+    console.log(`Could not reload config.json: ${e}`);
   }
 }
 
@@ -556,7 +725,7 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.user.id !== OWNER_ID) {
     await interaction.reply({
       content: "You are not authorized to use this command.",
-      ephemeral: true,
+      flags: 64, // 64 = EPHEMERAL
     });
     return;
   }
@@ -582,7 +751,7 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.reply({
         content:
           "Could not extract collection symbol from the provided URL. Please provide a valid Magic Eden collection URL or symbol.",
-        ephemeral: true,
+        flags: 64,
       });
       return;
     }
@@ -593,7 +762,7 @@ client.on("interactionCreate", async (interaction) => {
       const parsed = JSON.parse(raw);
       tracks = parsed.collections || {};
     } catch (e) {
-      console.error("Error reading tracks.json:", e);
+      console.log(`Error reading tracks.json: ${e}`);
     }
     tracks[symbol] = { max_price: maxPrice };
     fs.writeFileSync(
@@ -615,7 +784,7 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.reply({
         content:
           "Could not extract collection symbol from the provided URL. Please provide a valid Magic Eden collection URL or symbol.",
-        ephemeral: true,
+        flags: 64,
       });
       return;
     }
@@ -625,7 +794,7 @@ client.on("interactionCreate", async (interaction) => {
       const parsed = JSON.parse(raw);
       tracks = parsed.collections || {};
     } catch (e) {
-      console.error("Error reading tracks.json:", e);
+      console.log(`Error reading tracks.json: ${e}`);
     }
     delete tracks[symbol];
     fs.writeFileSync(
@@ -643,7 +812,7 @@ client.on("interactionCreate", async (interaction) => {
       const parsed = JSON.parse(raw);
       tracks = parsed.collections || {};
     } catch (e) {
-      console.error("Error reading tracks.json:", e);
+      console.log(`Error reading tracks.json: ${e}`);
     }
     const symbols = Object.keys(tracks);
     if (symbols.length === 0) {
@@ -678,13 +847,13 @@ client.on("interactionCreate", async (interaction) => {
       } while (lastBatchSize === 100);
       await interaction.reply({
         content: `🧹 Deleted ${totalDeleted} of my messages in this channel.`,
-        ephemeral: true,
+        flags: 64,
       });
     } catch (err) {
-      console.error("Cleanup error:", err);
+      console.log(`Cleanup error: ${err}`);
       await interaction.reply({
         content: "Failed to delete messages: " + err.message,
-        ephemeral: true,
+        flags: 64,
       });
     }
     return;
@@ -715,7 +884,7 @@ client.on("messageCreate", async (message) => {
       const parsed = JSON.parse(raw);
       tracks = parsed.collections || {};
     } catch (e) {
-      console.error("Error reading tracks.json:", e);
+      console.log(`Error reading tracks.json: ${e}`);
     }
     // Add or update the track
     tracks[symbol] = { max_price: maxPrice };
@@ -725,7 +894,10 @@ client.on("messageCreate", async (message) => {
       JSON.stringify({ collections: tracks }, null, 2)
     );
     message.reply(`✅ Now tracking ${symbol} with max price ${maxPrice} SOL.`);
-    console.log(`Tracked new collection: ${symbol} (max price: ${maxPrice})`);
+    colorLog(
+      `Tracked new collection: ${symbol} (max price: ${maxPrice})`,
+      "green"
+    );
     // Auto-index and check listings for the new track
     await indexCurrentListings();
     checkListingsAndNotify();
@@ -746,7 +918,7 @@ client.on("messageCreate", async (message) => {
       const parsed = JSON.parse(raw);
       tracks = parsed.collections || {};
     } catch (e) {
-      console.error("Error reading tracks.json:", e);
+      console.log(`Error reading tracks.json: ${e}`);
     }
     // Remove the track
     delete tracks[symbol];
@@ -756,7 +928,7 @@ client.on("messageCreate", async (message) => {
       JSON.stringify({ collections: tracks }, null, 2)
     );
     message.reply(`✅ Stopped tracking ${symbol}.`);
-    console.log(`Untracked collection: ${symbol}`);
+    colorLog(`Untracked collection: ${symbol}`, "yellow");
     return;
   }
 
@@ -769,7 +941,7 @@ client.on("messageCreate", async (message) => {
       const parsed = JSON.parse(raw);
       tracks = parsed.collections || {};
     } catch (e) {
-      console.error("Error reading tracks.json:", e);
+      console.log(`Error reading tracks.json: ${e}`);
     }
     const symbols = Object.keys(tracks);
     if (symbols.length === 0) {
@@ -809,7 +981,7 @@ client.on("messageCreate", async (message) => {
         .reply(`🧹 Deleted ${totalDeleted} of my messages in this channel.`)
         .then((msg) => setTimeout(() => msg.delete().catch(() => {}), 5000));
     } catch (err) {
-      console.error("Cleanup error:", err);
+      console.log(`Cleanup error: ${err}`);
       message
         .reply("Failed to delete messages: " + err.message)
         .then((msg) => setTimeout(() => msg.delete().catch(() => {}), 5000));
