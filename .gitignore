@@ -31,3 +31,9 @@ pnpm-debug.log*
 # Design / source assets
 *.psd
 *.fig
+
+# Project outlines
+MAGICEDEN_BOT_OUTLINE.md
+
+# Config file
+config.json

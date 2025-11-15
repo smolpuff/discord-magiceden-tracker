@@ -1,0 +1,13 @@
+{
+  "collections": {
+    "great__goats": {
+      "max_price": 0.4
+    },
+    "candies": {
+      "max_price": 0.2
+    },
+    "undead_genesis": {
+      "max_price": 0.5
+    }
+  }
+}
