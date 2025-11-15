@@ -1,7 +1,7 @@
 // Fetch total supply for a collection from Magic Eden and HowRare (fallback), then config.json as last resort
 const fetch = require("node-fetch");
 const fs = require("fs");
-const CONFIG_PATH = "./config.json";
+const TRACKS_PATH = "./data/tracks.json";
 
 async function fetchCollectionSupply(symbol) {
   let meFailed = false;
@@ -49,33 +49,37 @@ async function fetchCollectionSupply(symbol) {
     hrFailed = true;
   }
 
-  // If both APIs failed, log debug before config fallback
+  // If both APIs failed, log debug before tracks.json fallback
   if (meFailed && hrFailed) {
     colorLog(
-      `[SUPPLY][DEBUG] Both Magic Eden and HowRare API fetches failed for ${symbol}, falling back to config override if available.`,
+      `[SUPPLY][DEBUG] Both Magic Eden and HowRare API fetches failed for ${symbol}, falling back to tracks.json override if available.`,
       "magenta"
     );
   }
 
-  // Try config.json fallback
+  // Try tracks.json fallback
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+    const tracks = JSON.parse(fs.readFileSync(TRACKS_PATH, "utf8"));
     if (
-      config &&
-      config.supply_overrides &&
-      typeof config.supply_overrides[symbol] === "number"
+      tracks &&
+      tracks.collections &&
+      tracks.collections[symbol] &&
+      typeof tracks.collections[symbol].supply_override === "number"
     ) {
       colorLog(
-        `[SUPPLY] Using config override for ${symbol}: ${config.supply_overrides[symbol]}`,
+        `[SUPPLY] Using tracks.json override for ${symbol}: ${tracks.collections[symbol].supply_override}`,
         "yellow"
       );
-      return config.supply_overrides[symbol];
+      return tracks.collections[symbol].supply_override;
     } else {
-      colorLog(`[SUPPLY] No config override found for ${symbol}`, "magenta");
+      colorLog(
+        `[SUPPLY] No tracks.json override found for ${symbol}`,
+        "magenta"
+      );
     }
   } catch (e) {
     colorLog(
-      `[SUPPLY] Error reading config override for ${symbol}: ${e}`,
+      `[SUPPLY] Error reading tracks.json override for ${symbol}: ${e}`,
       "red"
     );
   }

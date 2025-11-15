@@ -47,6 +47,7 @@ const DISCORD_CHANNEL_ID = config.DISCORD_CHANNEL_ID;
 const TRACKS_PATH = "./data/tracks.json";
 const POLL_INTERVAL_SECONDS = parseInt(config.POLL_INTERVAL_SECONDS || "2", 10);
 const OWNER_ID = config.OWNER_ID;
+const TEST_MESSAGE_DELETE_SECONDS = config.TEST_MESSAGE_DELETE_SECONDS || 5;
 
 // Magic Eden/HowRare rarity tiers and color chart (as provided by user)
 const RARITY_COLORS = {
@@ -110,39 +111,13 @@ async function cacheAllCollectionSupplies() {
       }
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
-      // If HowRare didn't provide supply, fallback directly to config.json override
+      // If HowRare didn't provide supply, fallback is now handled in fetchCollectionSupply.js using tracks.json
       if (!collectionSupplies[symbol]) {
-        console.log(`[DEBUG] Attempting config override for ${symbol}`);
-        try {
-          if (
-            config &&
-            config.supply_overrides &&
-            typeof config.supply_overrides[symbol] === "number"
-          ) {
-            collectionSupplies[symbol] = config.supply_overrides[symbol];
-            colorLog(
-              `[SUPPLY] Using config override for ${symbol}: ${config.supply_overrides[symbol]}`,
-              "yellow"
-            );
-          } else {
-            colorLog(
-              `[SUPPLY] No config override found for ${symbol}, skipping this collection.`,
-              "magenta"
-            );
-            console.log(
-              `[DEBUG] Skipping collection due to missing supply: ${symbol}`
-            );
-            continue;
-          }
-        } catch (e) {
-          colorLog(
-            `[SUPPLY] Error reading config override for ${symbol}: ${e}. Skipping this collection.`,
-            "red"
-          );
-          console.log(`[DEBUG] Skipping collection due to error: ${symbol}`);
-          continue;
-        }
-        console.log(`[DEBUG] Finished supply check for collection: ${symbol}`);
+        colorLog(
+          `[SUPPLY] No supply found for ${symbol} from HowRare. Fallback handled in fetchCollectionSupply.js. Skipping this collection if still missing.`,
+          "magenta"
+        );
+        continue;
       }
     }
   } catch (err) {
@@ -348,9 +323,23 @@ async function checkListingsAndNotify() {
       return;
     }
     for (const symbol of symbols) {
-      const maxPrice = Number(collections[symbol].max_price) || Infinity;
+      let maxPrice = Number(collections[symbol].max_price);
+      if (!Number.isFinite(maxPrice) || maxPrice === 0) maxPrice = null;
+      // Optional: rarity filter (e.g., Legendary, Epic, etc.)
+      const minRarity = collections[symbol].min_rarity || null;
+      // Rarity order for comparison
+      const RARITY_ORDER = [
+        "Mythic",
+        "Legendary",
+        "Epic",
+        "Rare",
+        "Uncommon",
+        "Common",
+      ];
       console.log(
-        `Checking listings for ${symbol} (max price: ${maxPrice})...`
+        `Checking listings for ${symbol} (max price: ${
+          maxPrice !== null ? maxPrice + " SOL" : "None"
+        }${minRarity ? ", min rarity: " + minRarity : ""})...`
       );
       const listings = await fetchLatestListings(symbol);
       if (!listings.length) {
@@ -364,7 +353,43 @@ async function checkListingsAndNotify() {
           listing.price || listing.priceSol || listing.buyNowPrice || 0;
         const priceNum = Number(price);
         if (!Number.isFinite(priceNum)) continue;
-        if (priceNum > maxPrice) continue;
+        if (maxPrice !== null && priceNum > maxPrice) continue;
+
+        // Only extract howrare rarity fields if present, including nested rarity fields
+        let howrare =
+          (listing.rarity &&
+            listing.rarity.howrare &&
+            listing.rarity.howrare.rank) ||
+          (listing.extra &&
+            (listing.extra.howrare_rank ||
+              (listing.extra.howrare && listing.extra.howrare.rank) ||
+              listing.extra.howrare)) ||
+          listing.howrare_rank ||
+          (listing.howrare && listing.howrare.rank) ||
+          listing.howrare ||
+          (listing.token &&
+            (listing.token.howrare_rank ||
+              (listing.token.howrare && listing.token.howrare.rank) ||
+              listing.token.howrare)) ||
+          (listing.metadata &&
+            (listing.metadata.howrare_rank ||
+              (listing.metadata.howrare && listing.metadata.howrare.rank) ||
+              listing.metadata.howrare)) ||
+          null;
+
+        // Get rarity tier for this listing
+        const supply = collectionSupplies[symbol] || null;
+        let rankNum = Number(howrare);
+        let rarityTier = getRarityTier(rankNum, supply);
+
+        // Rarity filtering logic
+        if (
+          minRarity &&
+          RARITY_ORDER.indexOf(rarityTier) > RARITY_ORDER.indexOf(minRarity)
+        ) {
+          // Skip if this NFT is lower rarity than the filter
+          continue;
+        }
 
         seenListingIds.add(id);
         let name =
@@ -387,27 +412,6 @@ async function checkListingsAndNotify() {
           );
           name = "Unknown NFT";
         }
-        // Only extract howrare rarity fields if present, including nested rarity fields
-        let howrare =
-          (listing.rarity &&
-            listing.rarity.howrare &&
-            listing.rarity.howrare.rank) ||
-          (listing.extra &&
-            (listing.extra.howrare_rank ||
-              (listing.extra.howrare && listing.extra.howrare.rank) ||
-              listing.extra.howrare)) ||
-          listing.howrare_rank ||
-          (listing.howrare && listing.howrare.rank) ||
-          listing.howrare ||
-          (listing.token &&
-            (listing.token.howrare_rank ||
-              (listing.token.howrare && listing.token.howrare.rank) ||
-              listing.token.howrare)) ||
-          (listing.metadata &&
-            (listing.metadata.howrare_rank ||
-              (listing.metadata.howrare && listing.metadata.howrare.rank) ||
-              listing.metadata.howrare)) ||
-          null;
         const link =
           listing.marketplaceLink ||
           listing.listingURL ||
@@ -440,7 +444,7 @@ async function checkListingsAndNotify() {
           description: [
             `Name: **${name}**`,
             `Price: **${priceNum} SOL** (<= ${maxPrice} SOL)`,
-            howrare !== null ? `HowRare: **${howrare}**` : null,
+            howrare !== null ? `HowRare: **${howrare}** (${rarityTier})` : null,
             `Link: ${link}`,
           ]
             .filter(Boolean)
@@ -516,9 +520,9 @@ client.once("ready", () => {
   (async () => {
     console.log(`Logged in as ${client.user.tag}`);
     await registerSlashCommands();
-    console.log('[DEBUG] Finished registering slash commands.');
+    console.log("[DEBUG] Finished registering slash commands.");
     await cacheAllCollectionSupplies();
-    console.log('[DEBUG] Finished caching all collection supplies.');
+    console.log("[DEBUG] Finished caching all collection supplies.");
     // DEBUG: Post the first real listing as an embed and auto-delete after 5s (for testing)
     try {
       const debugChannel = await client.channels.fetch(DISCORD_CHANNEL_ID);
@@ -530,7 +534,17 @@ client.once("ready", () => {
       const symbol = symbols[0];
       const listings = await fetchLatestListings(symbol);
       if (!listings.length) return;
-      for (let i = 0; i < Math.min(3, listings.length); i++) {
+      const minRarity = collections[symbol].min_rarity || null;
+      let shown = 0;
+      const RARITY_ORDER = [
+        "Mythic",
+        "Legendary",
+        "Epic",
+        "Rare",
+        "Uncommon",
+        "Common",
+      ];
+      for (let i = 0; i < listings.length && shown < 3; i++) {
         const listing = listings[i];
         // Debug: print the full listing object to console
         console.log(
@@ -566,8 +580,19 @@ client.once("ready", () => {
         let rankNum = Number(howrare);
         let rarityTier = getRarityTier(rankNum, supply);
         let rarityColor = RARITY_COLORS[rarityTier] || "#9b59ff";
+
+        // Rarity filtering logic for debug/test
+        if (
+          minRarity &&
+          RARITY_ORDER.indexOf(rarityTier) > RARITY_ORDER.indexOf(minRarity)
+        ) {
+          continue;
+        }
+
         const embed = {
-          title: `DEBUG: Listing #${i + 1} for ${symbol} (auto-deletes in 5s)`,
+          title: `DEBUG: Listing #${
+            i + 1
+          } for ${symbol} (auto-deletes in ${TEST_MESSAGE_DELETE_SECONDS}s)`,
           description: [
             `Name: **${name}**`,
             `Price: **${price} SOL**`,
@@ -587,7 +612,12 @@ client.once("ready", () => {
           embed.image = { url: imageUrl };
         }
         const msg = await debugChannel.send({ embeds: [embed] });
-        setTimeout(() => msg.delete().catch(() => {}), 5000);
+        setTimeout(
+          () => msg.delete().catch(() => {}),
+          TEST_MESSAGE_DELETE_SECONDS * 1000
+        );
+        shown++;
+        if (shown >= 3) break;
       }
     } catch (err) {
       console.log(`DEBUG fetch error: ${err}`);
@@ -622,9 +652,11 @@ async function pollNextCollectionRoundRobin() {
   if (Date.now() < globalBackoffUntil) return;
   // Pick next collection
   const symbol = symbols[roundRobinIdx % symbols.length];
-  const maxPrice = Number(collections[symbol].max_price) || Infinity;
-  // Placeholder for future filter options (rarity, etc.)
-  const filterOptions = [`maxPrice: ${maxPrice}`];
+  let maxPrice = Number(collections[symbol].max_price);
+  if (!Number.isFinite(maxPrice) || maxPrice === 0) maxPrice = null;
+  const minRarity = collections[symbol].min_rarity || null;
+  const filterOptions = [`maxPrice: ${maxPrice !== null ? maxPrice : "None"}`];
+  if (minRarity) filterOptions.push(`minRarity: ${minRarity}`);
   // Add more filter options here as needed (e.g., rarity)
   console.log(
     `[Polling] Checking collection: ${symbol} (${filterOptions.join(", ")})`
@@ -643,7 +675,7 @@ async function pollNextCollectionRoundRobin() {
         listing.price || listing.priceSol || listing.buyNowPrice || 0;
       const priceNum = Number(price);
       if (!Number.isFinite(priceNum)) continue;
-      if (priceNum > maxPrice) continue;
+      if (maxPrice !== null && priceNum > maxPrice) continue;
       seenListingIds.add(id);
 
       // Fetch token metadata to get name and image
@@ -979,12 +1011,22 @@ client.on("messageCreate", async (message) => {
       } while (lastBatchSize === 100); // Repeat if there might be more
       message
         .reply(`🧹 Deleted ${totalDeleted} of my messages in this channel.`)
-        .then((msg) => setTimeout(() => msg.delete().catch(() => {}), 5000));
+        .then((msg) =>
+          setTimeout(
+            () => msg.delete().catch(() => {}),
+            TEST_MESSAGE_DELETE_SECONDS * 1000
+          )
+        );
     } catch (err) {
       console.log(`Cleanup error: ${err}`);
       message
         .reply("Failed to delete messages: " + err.message)
-        .then((msg) => setTimeout(() => msg.delete().catch(() => {}), 5000));
+        .then((msg) =>
+          setTimeout(
+            () => msg.delete().catch(() => {}),
+            TEST_MESSAGE_DELETE_SECONDS * 1000
+          )
+        );
     }
   }
 });

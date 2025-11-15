@@ -106,6 +106,57 @@ Use these slash commands in Discord to manage tracked collections and bot action
 - `ROUND_ROBIN_TICK_MS`: Polling interval per collection (ms, default 750; increase for more safety)
 - `BACKOFF_MS`: Backoff time after 429 (ms, default 10000)
 - `OWNER_ID`: Only this Discord user can control the bot
+- `TEST_MESSAGE_DELETE_SECONDS`: How long (in seconds) to keep test/debug messages before auto-deleting (default: 5)
+
+## Tracking Collections (`data/tracks.json`)
+
+Each collection can have its own config. Example:
+
+```json
+{
+  "collections": {
+    "great__goats": {
+      "max_price": 0.4,
+      "min_rarity": "Legendary",
+      "supply_override": 9593
+    },
+    "candies": {
+      "max_price": 0.4,
+      "supply_override": 10000
+    },
+    "undead_genesis": {
+      "supply_override": 4515
+    }
+  }
+}
+```
+
+- `max_price`: Only alert for listings at or below this price
+- `min_rarity`: Only alert for NFTs at or above this rarity (optional)
+- `supply_override`: Fallback supply for rarity math if APIs fail (optional, per collection)
+
+If `supply_override` is set, it will be used only if Magic Eden and HowRare APIs fail to provide supply.
+
+## Rarity Filtering (Optional)
+
+You can set a minimum rarity for each collection in `data/tracks.json` using the `min_rarity` field. Only NFTs at or above this rarity will trigger notifications and appear in the debug/test output.
+
+**Example:**
+
+```json
+{
+  "collections": {
+    "great__goats": {
+      "max_price": 0.4,
+      "min_rarity": "Legendary"
+    }
+  }
+}
+```
+
+Valid values: `Mythic`, `Legendary`, `Epic`, `Rare`, `Uncommon`, `Common`
+
+If omitted, all rarities are allowed.
 
 ## Notes
 
