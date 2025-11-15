@@ -444,7 +444,7 @@ async function checkListingsAndNotify() {
           description: [
             `Name: **${name}**`,
             `Price: **${priceNum} SOL** (<= ${maxPrice} SOL)`,
-            howrare !== null ? `HowRare: **${howrare}** (${rarityTier})` : null,
+            howrare !== null ? `Rarity: **${howrare}** (${rarityTier})` : null,
             `Link: ${link}`,
           ]
             .filter(Boolean)
@@ -590,16 +590,14 @@ client.once("ready", () => {
         }
 
         const embed = {
-          title: `DEBUG: Listing #${
-            i + 1
-          } for ${symbol} (auto-deletes in ${TEST_MESSAGE_DELETE_SECONDS}s)`,
+          title: `DEBUG: Listing #${i + 1} for ${symbol}`,
           description: [
             `Name: **${name}**`,
             `Price: **${price} SOL**`,
             howrare !== null && !isNaN(rankNum) && supply
-              ? `HowRare: **${howrare}** (${rarityTier})`
+              ? `Rarity: **${howrare}** (${rarityTier})`
               : howrare !== null
-              ? `HowRare: **${howrare}**`
+              ? `Rarity: **${howrare}**`
               : null,
             `Link: ${link}`,
           ]
@@ -708,9 +706,9 @@ async function pollNextCollectionRoundRobin() {
           `Name: **${name}**`,
           `Price: **${priceNum} SOL** (<= ${maxPrice} SOL)`,
           howrare !== null && !isNaN(rankNum) && supply
-            ? `HowRare: **${howrare}** (${rarityTier})`
+            ? `Rarity: **${howrare}** (${rarityTier})`
             : howrare !== null
-            ? `HowRare: **${howrare}**`
+            ? `Rarity: **${howrare}**`
             : null,
           `Link: ${link}`,
         ]
@@ -756,7 +754,7 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isCommand()) return;
   if (interaction.user.id !== OWNER_ID) {
     await interaction.reply({
-      content: "You are not authorized to use this command.",
+      content: "You're not my daddy.",
       flags: 64, // 64 = EPHEMERAL
     });
     return;

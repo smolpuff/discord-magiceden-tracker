@@ -1,18 +1,22 @@
 {
   "collections": {
     "great__goats": {
-      "max_price": 0.4,
-      "supply_override": 9593
+      "supply_override": 9593,
+      "min_rarity": "Rare"
     },
     "candies": {
-      "max_price": 0.4,
-      "supply_override": 10000
+      "max_price": 0.3,
+      "supply_override": 2698,
+      "min_rarity": "Epic"
     },
     "undead_genesis": {
-      "supply_override": 4515
+      "max_price": 0.3,
+      "supply_override": 4515,
+      "min_rarity": "Legendary"
     },
     "morbie": {
-      "max_price": 0.5
+      "max_price": 0.5,
+      "supply_override": 9995
     }
   }
 }
