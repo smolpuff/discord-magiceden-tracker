@@ -167,6 +167,14 @@ If omitted, all rarities are allowed.
 - **The more collections you track, the longer it takes to check each one again.** For example, with 10 collections and a 550ms tick, each collection is checked about every 5.5 seconds. Polling gets slower for each collection as you add more.
 - If you get rate-limited (429), polling pauses and slows down automatically.
 
+## Update Log
+
+- v0.1.4: Added rarity filtering, added rarity coloring in notification
+- v0.1.3: Added rarity rating with HowRare API; fallback in config for max_supply
+- v0.1.2: Added max price filter
+- v0.1.1: General update
+- v0.1.0: Initial release
+
 ## License
 
 MIT

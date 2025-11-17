@@ -1,3 +1,6 @@
+// Version reference for update log
+const METRACKER_VERSION = "0.1.4";
+
 const fs = require("fs");
 const { Client, GatewayIntentBits } = require("discord.js");
 const { REST, Routes, SlashCommandBuilder } = require("discord.js");
