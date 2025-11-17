@@ -523,7 +523,13 @@ client.once("ready", () => {
     console.log("[DEBUG] Finished registering slash commands.");
     await cacheAllCollectionSupplies();
     console.log("[DEBUG] Finished caching all collection supplies.");
+
+    // Always index all current listings at startup FIRST to avoid spam
+    await indexCurrentListings();
+    console.log("[DEBUG] Finished indexing current listings.");
+
     // DEBUG: Post the first real listing as an embed and auto-delete after 5s (for testing)
+    // These are NOT added to seenListingIds so they can be notified again if still present
     try {
       const debugChannel = await client.channels.fetch(DISCORD_CHANNEL_ID);
       const raw = fs.readFileSync(TRACKS_PATH, "utf8");
@@ -620,8 +626,7 @@ client.once("ready", () => {
     } catch (err) {
       console.log(`DEBUG fetch error: ${err}`);
     }
-    // Always index all current listings at startup to avoid spam
-    await indexCurrentListings();
+
     startRoundRobinPolling();
   })();
 });
