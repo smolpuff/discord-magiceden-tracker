@@ -85,8 +85,9 @@ let howRareCache = {};
 // Mapping of Magic Eden symbols to HowRare collection slugs
 const ME_TO_HOWRARE = {
   great__goats: "greatgoats",
-  undead_genesis: "undeadgenesis",
+  undead_genesis: "undead_genesis",
   candies: "candies",
+  morbie: "morbie",
   // Add more mappings as needed
 };
 
@@ -539,92 +540,98 @@ client.once("ready", () => {
       const parsed = JSON.parse(raw);
       const collections = parsed.collections || {};
       const symbols = Object.keys(collections);
-      if (!symbols.length) return;
-      const symbol = symbols[0];
-      const listings = await fetchLatestListings(symbol);
-      if (!listings.length) return;
-      const minRarity = collections[symbol].min_rarity || null;
-      let shown = 0;
-      const RARITY_ORDER = [
-        "Mythic",
-        "Legendary",
-        "Epic",
-        "Rare",
-        "Uncommon",
-        "Common",
-      ];
-      for (let i = 0; i < listings.length && shown < 3; i++) {
-        const listing = listings[i];
-        // Debug: print the full listing object to console
-        console.log(
-          `DEBUG: Listing #${i + 1} object: ${JSON.stringify(listing, null, 2)}`
-        );
-        // Fetch token metadata from the token endpoint
-        const tokenMint = listing.tokenMint || listing.mint;
-        console.log(`[DEBUG] Fetching token metadata for ${tokenMint}...`);
-        const tokenData = tokenMint
-          ? await fetchTokenMetadata(tokenMint)
-          : null;
-        console.log(
-          `[DEBUG] Token data: ${
-            tokenData ? JSON.stringify(tokenData, null, 2) : "null"
-          }`
-        );
+      if (symbols.length > 0) {
+        const symbol = symbols[0];
+        const listings = await fetchLatestListings(symbol);
+        if (listings.length > 0) {
+          const minRarity = collections[symbol].min_rarity || null;
+          let shown = 0;
+          const RARITY_ORDER = [
+            "Mythic",
+            "Legendary",
+            "Epic",
+            "Rare",
+            "Uncommon",
+            "Common",
+          ];
+          for (let i = 0; i < listings.length && shown < 3; i++) {
+            const listing = listings[i];
+            // Debug: print the full listing object to console
+            console.log(
+              `DEBUG: Listing #${i + 1} object: ${JSON.stringify(
+                listing,
+                null,
+                2
+              )}`
+            );
+            // Fetch token metadata from the token endpoint
+            const tokenMint = listing.tokenMint || listing.mint;
+            console.log(`[DEBUG] Fetching token metadata for ${tokenMint}...`);
+            const tokenData = tokenMint
+              ? await fetchTokenMetadata(tokenMint)
+              : null;
+            console.log(
+              `[DEBUG] Token data: ${
+                tokenData ? JSON.stringify(tokenData, null, 2) : "null"
+              }`
+            );
 
-        const price = listing.price || 0; // Already in SOL
-        let name = tokenData?.name || "Unknown NFT";
+            const price = listing.price || 0; // Already in SOL
+            let name = tokenData?.name || "Unknown NFT";
 
-        // Get rarity rank from cached HowRare data
-        let howrare = getHowRareRank(symbol, tokenMint);
-        // Print HowRare prefix in magenta, rank in yellow
-        console.log(
-          `${colors.magenta}[HOWRARE] HowRare rank for ${tokenMint}: ${colors.yellow}${howrare}${colors.magenta}${colors.reset}`
-        );
-        const link = `https://magiceden.io/item-details/${tokenMint || ""}`;
-        let imageUrl =
-          listing.image || tokenData?.image || tokenData?.img || null;
+            // Get rarity rank from cached HowRare data
+            let howrare = getHowRareRank(symbol, tokenMint);
+            // Print HowRare prefix in magenta, rank in yellow
+            console.log(
+              `${colors.magenta}[HOWRARE] HowRare rank for ${tokenMint}: ${colors.yellow}${howrare}${colors.magenta}${colors.reset}`
+            );
+            const link = `https://magiceden.io/item-details/${tokenMint || ""}`;
+            let imageUrl =
+              listing.image || tokenData?.image || tokenData?.img || null;
 
-        // Use cached supply for rarity tier
-        let supply = collectionSupplies[symbol] || null;
-        let rankNum = Number(howrare);
-        let rarityTier = getRarityTier(rankNum, supply);
-        let rarityColor = RARITY_COLORS[rarityTier] || "#9b59ff";
+            // Use cached supply for rarity tier
+            let supply = collectionSupplies[symbol] || null;
+            let rankNum = Number(howrare);
+            let rarityTier = getRarityTier(rankNum, supply);
+            let rarityColor = RARITY_COLORS[rarityTier] || "#9b59ff";
 
-        // Rarity filtering logic for debug/test
-        if (
-          minRarity &&
-          RARITY_ORDER.indexOf(rarityTier) > RARITY_ORDER.indexOf(minRarity)
-        ) {
-          continue;
+            // Rarity filtering logic for debug/test
+            if (
+              minRarity &&
+              RARITY_ORDER.indexOf(rarityTier) > RARITY_ORDER.indexOf(minRarity)
+            ) {
+              continue;
+            }
+
+            const embed = {
+              title: `DEBUG: Listing #${i + 1} for ${symbol}`,
+              description: [
+                `Name: **${name}**`,
+                `Price: **${price} SOL**`,
+                howrare !== null && !isNaN(rankNum) && supply
+                  ? `Rarity: **${howrare}** (${rarityTier})`
+                  : howrare !== null
+                  ? `Rarity: **${howrare}**`
+                  : null,
+                `Link: ${link}`,
+              ]
+                .filter(Boolean)
+                .join("\n"),
+              url: link,
+              color: parseInt(rarityColor.replace("#", ""), 16),
+            };
+            if (imageUrl) {
+              embed.image = { url: imageUrl };
+            }
+            const msg = await debugChannel.send({ embeds: [embed] });
+            setTimeout(
+              () => msg.delete().catch(() => {}),
+              TEST_MESSAGE_DELETE_SECONDS * 1000
+            );
+            shown++;
+            if (shown >= 3) break;
+          }
         }
-
-        const embed = {
-          title: `DEBUG: Listing #${i + 1} for ${symbol}`,
-          description: [
-            `Name: **${name}**`,
-            `Price: **${price} SOL**`,
-            howrare !== null && !isNaN(rankNum) && supply
-              ? `Rarity: **${howrare}** (${rarityTier})`
-              : howrare !== null
-              ? `Rarity: **${howrare}**`
-              : null,
-            `Link: ${link}`,
-          ]
-            .filter(Boolean)
-            .join("\n"),
-          url: link,
-          color: parseInt(rarityColor.replace("#", ""), 16),
-        };
-        if (imageUrl) {
-          embed.image = { url: imageUrl };
-        }
-        const msg = await debugChannel.send({ embeds: [embed] });
-        setTimeout(
-          () => msg.delete().catch(() => {}),
-          TEST_MESSAGE_DELETE_SECONDS * 1000
-        );
-        shown++;
-        if (shown >= 3) break;
       }
     } catch (err) {
       console.log(`DEBUG fetch error: ${err}`);

@@ -4,15 +4,11 @@
       "supply_override": 9593,
       "max_price": 0.6
     },
-    "candies": {
-      "max_price": 0.3,
-      "supply_override": 2698,
-      "min_rarity": "Epic"
-    },
+
     "undead_genesis": {
       "max_price": 0.3,
       "supply_override": 4515,
-      "min_rarity": "Epic"
+      "min_rarity": "Rare"
     }
   }
 }
