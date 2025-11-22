@@ -27,13 +27,15 @@ pnpm-debug.log*
 .idea/
 .vscode/
 *.swp
+.gitignore
 
 # Design / source assets
 *.psd
 *.fig
 
-# Project outlines
-MAGICEDEN_BOT_OUTLINE.md
 
 # Config file
 config.json
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
