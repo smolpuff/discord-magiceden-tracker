@@ -933,12 +933,31 @@ async function pollNextCollectionRoundRobin() {
 
     for (const activity of activities) {
       const id = activity.tokenMint || activity.id || JSON.stringify(activity);
-      if (seenSet.has(id)) continue;
+      if (seenSet.has(id)) {
+        if (process.argv.includes("--debug")) {
+          colorLog(`[SKIP] Already seen: ${id}`, "gray");
+        }
+        continue;
+      }
       const price =
         activity.price || activity.priceSol || activity.buyNowPrice || 0;
       const priceNum = Number(price);
-      if (!Number.isFinite(priceNum)) continue;
-      if (maxPrice !== null && priceNum > maxPrice) continue;
+      if (!Number.isFinite(priceNum)) {
+        if (process.argv.includes("--debug")) {
+          colorLog(`[SKIP] Invalid price for ${id}: ${priceNum}`, "yellow");
+        }
+        continue;
+      }
+      if (maxPrice !== null && priceNum > maxPrice) {
+        if (process.argv.includes("--debug")) {
+          colorLog(
+            `[SKIP] Price ${priceNum} > max ${maxPrice} for ${id}`,
+            "yellow"
+          );
+        }
+        continue;
+      }
+      colorLog(`[NEW] Found new ${type}: ${id} at ${priceNum} SOL`, "cyan");
 
       // Fetch token metadata to get name and image
       const tokenMint = activity.tokenMint || activity.mint;
