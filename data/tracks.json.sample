@@ -1,7 +1,17 @@
 {
   "collections": {
-    "great__goats": {
-      "max_price": 0.4
+    "y00ts": {
+      "max_price": 3.5,
+      "min_rarity": "Legendary"
+    },
+    "mad_lads": {
+      "max_price": 50
+    }
+  },
+  "sales_collections": {
+    "mad_lads": {
+      "max_price": 60,
+      "min_rarity": "Rare"
     }
   }
 }

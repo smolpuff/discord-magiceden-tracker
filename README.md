@@ -1,27 +1,8 @@
-# Discord Magic Eden Tracker
+# discord-magiceden-tracker
 
-A Discord bot for tracking Magic Eden NFT listings/sales, with price filtering and fast, rate-limit-safe polling.
+Track Magic Eden NFT listings and sales in Discord. Price/rarity filters, unified polling, supply overrides, and rich Discord alerts.
 
-## Features
-
-- Track multiple Magic Eden collections with per-collection price filters
-- Fast, round-robin polling (rate-limit safe)
-- Discord alerts with NFT images and links
-- Slash commands for tracking, untracking, listing, and cleaning up
-- Owner-only command restriction
-- Config and tracks reload live (no restart needed)
-- Exponential backoff on API throttling (429)
-
-## Requirements
-
-- You must set up a Discord application and bot in the [Discord Developer Portal](https://discord.com/developers/applications) to use this tracker since it's not published. See below for setup instructions.
-
-- Node.js 18+
-- Discord bot token and permissions (see below)
-
-## Quick Start
-
-## Discord Bot Setup (Developer Portal)
+## Setup
 
 1. Go to the [Discord Developer Portal](https://discord.com/developers/applications) and click "New Application".
 2. Name your application (e.g., "Magic Eden Tracker").
@@ -35,145 +16,123 @@ A Discord bot for tracking Magic Eden NFT listings/sales, with price filtering a
 - Copy the generated URL and use it to invite the bot to your server.
 
 7. In "General Information", copy the "Application ID" (Client ID) and your server's ID (GUILD_ID) for use in `config.json`.
+8. To get your channel ID, right-click the target Discord channel and select "Copy ID" (you may need to enable Developer Mode in Discord settings).
 
-You can now use your bot token, client ID, and guild ID in your `config.json` file. See the sample config for details.
+You can now use your bot token, channel ID, client ID, and guild ID in your `config.json` file. See the example config below for details.
 
-1. **Install dependencies**
+## Commands
 
-   ```bash
-   npm install
-   ```
+| Command           | Description                                                        |
+| ----------------- | ------------------------------------------------------------------ |
+| `/metrack`        | Track new listings for a collection                                |
+| `/meuntrack`      | Stop tracking listings for a collection                            |
+| `/mesalestrack`   | Track sales for a collection                                       |
+| `/mesalesuntrack` | Stop tracking sales for a collection                               |
+| `/melist`         | List all tracked collections (listings & sales)                    |
+| `/mecleanup`      | Delete the bot's own messages in the channel                       |
+| `/metest`         | Clear the seen cache and force re-alerts on current listings/sales |
 
-2. **Copy and edit config**
+## Usage
 
-   ```bash
-   cp config.json.sample config.json
-   # Edit config.json with your bot token, channel, IDs, etc. (only needed for initial setup)
-   ```
+1. Install dependencies:
 
-3. **Run the bot**
+```bash
+npm install
+```
 
-   ```bash
-   node metracker.js
-   # or
-   nodemon metracker.js
-   ```
+2. Copy the example config and fill in your details:
 
-4. **Track collections using commands in Discord**
+```bash
+cp config.json.sample config.json
+# Edit config.json with your bot token, channel ID, client ID, and guild ID
+```
 
-   - Use the `/metrack` command to add a collection to track from discord (see below for usage).
+3. Start the bot:
 
-## Managing Collections & Commands
+```bash
+node metracker.js
+```
 
-Use these slash commands in Discord to manage tracked collections and bot actions:
+4. In Discord, use one of the slash commands (see Commands section below) to start tracking a collection, list tracked collections, clear cache, or clean up messages.
+5. After you use a tracking command (e.g., `/metrack` or `/mesalestrack`), the bot will update and begin tracking/alerting for that collection automatically.
+6. You can add, remove, or list tracked collections at any time using the appropriate slash commands. The bot will always reflect your latest tracking configuration.
 
-- `/metrack magicedenURL:<url> <max_price>` — Track a collection (by Magic Eden URL or symbol)
-- `/meuntrack magicedenURL:<url>` — Untrack a collection
-- `/melist` — List all tracked collections
-- `/mecleanup` — Delete the bot's own messages in the channel
+## Features
 
-#### Example Usage
+- Track listings and sales for multiple collections
+- Per-collection price and rarity filtering (HowRare.is integration)
+- Unified round-robin polling
+- Supply overrides for fallback rarity math
+- Discord alerts with NFT images, rarity tiers, and direct Magic Eden links
+- Owner-only slash commands for all bot controls
+- Cache of seen listings/sales only clears at startup or via `/metest`
+- Handles Magic Eden API rate limits with backoff and slower polling
 
-- **Track a collection:**
+---
 
-  ```
-  /metrack https://magiceden.io/marketplace/y00ts
-  ```
-
-- **Untrack a collection:**
-
-  ```
-  /meuntrack https://magiceden.io/marketplace/y00ts
-  ```
-
-- **List tracked collections:**
-
-  ```
-  /melist
-  ```
-
-- **Delete _all_ bot messages in discord:**
-  ```
-  /mecleanup
-  ```
-
-## Configuration (`config.json`)
-
-- `DISCORD_TOKEN`: Your Discord bot token
-- `DISCORD_CHANNEL_ID`: Channel to post alerts
-- `CLIENT_ID`: Your bot's application ID
-- `GUILD_ID`: Your server's ID
-- `ROUND_ROBIN_TICK_MS`: Polling interval per collection (ms, default 750; increase for more safety)
-- `BACKOFF_MS`: Backoff time after 429 (ms, default 10000)
-- `OWNER_ID`: Only this Discord user can control the bot
-- `TEST_MESSAGE_DELETE_SECONDS`: How long (in seconds) to keep test/debug messages before auto-deleting (default: 5)
-
-## Tracking Collections (`data/tracks.json`)
-
-Each collection can have its own config. Example:
+## Example config
 
 ```json
 {
-  "collections": {
-    "great__goats": {
-      "max_price": 0.4,
-      "min_rarity": "Legendary",
-      "supply_override": 9593
-    },
-    "candies": {
-      "max_price": 0.4,
-      "supply_override": 10000
-    },
-    "undead_genesis": {
-      "supply_override": 4515
-    }
-  }
+  "DISCORD_TOKEN": "YOUR_DISCORD_BOT_TOKEN",
+  "DISCORD_CHANNEL_ID": "YOUR_DISCORD_CHANNEL_ID",
+  "CLIENT_ID": "YOUR_BOT_CLIENT_ID",
+  "GUILD_ID": "YOUR_GUILD_ID",
+  "ROUND_ROBIN_TICK_MS": 750,
+  "BACKOFF_MS": 10000,
+  "OWNER_ID": "YOUR_DISCORD_USER_ID"
 }
 ```
 
-- `max_price`: Only alert for listings at or below this price
-- `min_rarity`: Only alert for NFTs at or above this rarity (optional)
-- `supply_override`: Fallback supply for rarity math if APIs fail (optional, per collection)
+---
 
-If `supply_override` is set, it will be used only if Magic Eden and HowRare APIs fail to provide supply.
+## Changelog (Summary)
 
-## Rarity Filtering (Optional)
+**Latest:**
 
-You can set a minimum rarity for each collection in `data/tracks.json` using the `min_rarity` field. Only NFTs at or above this rarity will trigger notifications and appear in the debug/test output.
-
-**Example:**
-
-```json
-{
-  "collections": {
-    "y00ts": {
-      "max_price": 3.2,
-      "min_rarity": "Legendary"
-    }
-  }
-}
-```
-
-Valid values: `Mythic`, `Legendary`, `Epic`, `Rare`, `Uncommon`, `Common`
-
-If omitted, all rarities are allowed.
-
-## Notes
-
-- The bot polls one collection per tick (default 750ms), round-robin.
-
-**Magic Eden's public API recommends no more than 2 requests per second per IP.** This bot can be configured to poll faster, but the default is set conservatively for safety and reliability. Adjust `ROUND_ROBIN_TICK_MS` in your config if you want to poll more aggressively (at your own risk).
-
-- **The more collections you track, the longer it takes to check each one again.** For example, with 10 collections and a 550ms tick, each collection is checked about every 5.5 seconds. Polling gets slower for each collection as you add more.
-- If you get rate-limited (429), polling pauses and slows down automatically.
-
-## Update Log
-
+- v0.1.5: Integrated sales tracking into main tracker with unified round-robin polling; added `/mesalestrack`, `/mesalesuntrack`, `/metest` commands; cache only clears at startup or via `/metest` (no hourly spam)
 - v0.1.4: Added rarity filtering, added rarity coloring in notification
 - v0.1.3: Added rarity rating with HowRare API; fallback in config for max_supply
 - v0.1.2: Added max price filter
 - v0.1.1: General update
 - v0.1.0: Initial release
+
+<details>
+<summary>Full changelog</summary>
+
+---
+
+### metracker.js
+
+#### 0.1.5
+
+- Integrated sales tracking into main tracker with unified round-robin polling
+- Added `/mesalestrack`, `/mesalesuntrack`, `/metest` commands
+- Cache only clears at startup or via `/metest` (no hourly spam)
+
+#### 0.1.4
+
+- Added rarity filtering, added rarity coloring in notification
+
+#### 0.1.3
+
+- Added rarity rating with HowRare API; fallback in config for max_supply
+
+#### 0.1.2
+
+- Added max price filter
+
+#### 0.1.1
+
+- General update
+
+#### 0.1.0
+
+- Initial release
+
+</details>
+
+---
 
 ## License
 

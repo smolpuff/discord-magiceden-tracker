@@ -1,14 +1,18 @@
 {
   "collections": {
     "great__goats": {
-      "supply_override": 9593,
-      "max_price": 0.6
+      "supply_override": 9593
     },
-
+    "candies": {
+      "supply_override": 9593,
+      "max_price": 0.2,
+      "min_rarity": "Legendary"
+    },
     "undead_genesis": {
-      "max_price": 0.3,
+      "max_price": 0.2,
       "supply_override": 4515,
       "min_rarity": "Rare"
     }
-  }
+  },
+  "sales_collections": {}
 }

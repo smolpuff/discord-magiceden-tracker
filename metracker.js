@@ -1,5 +1,5 @@
 // Version reference for update log
-const METRACKER_VERSION = "0.1.4";
+const METRACKER_VERSION = "0.1.5";
 
 const fs = require("fs");
 const { Client, GatewayIntentBits } = require("discord.js");
@@ -75,6 +75,11 @@ function getRarityTier(rank, supply) {
 
 // To avoid spamming the same item over and over:
 let seenListingIds = new Set();
+let seenSalesIds = new Set();
+
+// Track when we last cleared the seen caches (to prevent infinite growth)
+let lastCacheClear = Date.now();
+const CACHE_CLEAR_INTERVAL_MS = 3600000; // Clear cache every 1 hour
 
 // Cache for collection supplies
 let collectionSupplies = {};
@@ -100,8 +105,12 @@ async function cacheAllCollectionSupplies() {
     const raw = fs.readFileSync(TRACKS_PATH, "utf8");
     const parsed = JSON.parse(raw);
     const collections = parsed.collections || {};
-    const symbols = Object.keys(collections);
-    for (const symbol of symbols) {
+    const salesCollections = parsed.sales_collections || {};
+    const allSymbols = new Set([
+      ...Object.keys(collections),
+      ...Object.keys(salesCollections),
+    ]);
+    for (const symbol of allSymbols) {
       console.log(`[DEBUG] Starting supply check for collection: ${symbol}`);
       // First try to get supply from HowRare (faster and more reliable)
       console.log(`[DEBUG] Fetching HowRare data for ${symbol}...`);
@@ -135,12 +144,15 @@ let globalBackoffUntil = 0;
 let dynamicTickMs = TICK_MS;
 const BACKOFF_MS = config.BACKOFF_MS || 10000;
 
-// Index all current listings at startup so only new ones trigger alerts
+// Index all current listings and sales at startup so only new ones trigger alerts
 async function indexCurrentListings() {
   try {
     const raw = fs.readFileSync(TRACKS_PATH, "utf8");
     const parsed = JSON.parse(raw);
     const collections = parsed.collections || {};
+    const salesCollections = parsed.sales_collections || {};
+
+    // Index listings
     const symbols = Object.keys(collections);
     for (const symbol of symbols) {
       const listings = await fetchLatestListings(symbol);
@@ -149,9 +161,20 @@ async function indexCurrentListings() {
         seenListingIds.add(id);
       }
     }
-    console.log("Indexed current listings at startup.");
+
+    // Index sales
+    const salesSymbols = Object.keys(salesCollections);
+    for (const symbol of salesSymbols) {
+      const sales = await fetchSales(symbol);
+      for (const sale of sales) {
+        const id = sale.tokenMint || sale.id || JSON.stringify(sale);
+        seenSalesIds.add(id);
+      }
+    }
+
+    console.log("Indexed current listings and sales at startup.");
   } catch (err) {
-    console.log(`Error indexing current listings: ${err}`);
+    console.log(`Error indexing current listings/sales: ${err}`);
   }
 }
 
@@ -209,6 +232,58 @@ async function fetchListingsWithBackoff(symbol) {
 // Alias for compatibility with previous code
 const fetchLatestListings = fetchListings;
 const fetchLatestListingsWithBackoff = fetchListingsWithBackoff;
+
+// Fetch sales (buyNow activities)
+async function fetchSales(symbol) {
+  if (!symbol) return [];
+  const url = `https://api-mainnet.magiceden.dev/v2/collections/${encodeURIComponent(
+    symbol
+  )}/activities?limit=40`;
+  let res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (res.status === 429) {
+    console.error(
+      `[DEBUG] Magic Eden API throttled (429) for symbol: ${symbol}`
+    );
+    return [];
+  }
+  if (!res.ok) {
+    console.error(
+      `Error fetching activities for ${symbol}:`,
+      res.status,
+      await res.text()
+    );
+    return [];
+  }
+  const data = await res.json();
+  if (!Array.isArray(data)) return [];
+  // Only keep 'buyNow' activities (sales)
+  return data.filter((activity) => activity.type === "buyNow");
+}
+
+// Wrap fetchSales to throw on 429
+async function fetchSalesWithBackoff(symbol) {
+  if (!symbol) return [];
+  const url = `https://api-mainnet.magiceden.dev/v2/collections/${encodeURIComponent(
+    symbol
+  )}/activities?limit=40`;
+  let res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (res.status === 429) {
+    const err = new Error("HTTP 429");
+    err.is429 = true;
+    throw err;
+  }
+  if (!res.ok) {
+    console.error(
+      `Error fetching activities for ${symbol}:`,
+      res.status,
+      await res.text()
+    );
+    return [];
+  }
+  const data = await res.json();
+  if (!Array.isArray(data)) return [];
+  return data.filter((activity) => activity.type === "buyNow");
+}
 
 // Fetch token metadata for a specific tokenMint
 async function fetchTokenMetadata(tokenMint) {
@@ -501,8 +576,39 @@ async function registerSlashCommands() {
           .setRequired(true)
       ),
     new SlashCommandBuilder()
+      .setName("mesalestrack")
+      .setDescription(
+        "Track sales for a collection. Usage: /mesalestrack magicedenURL:<url> <max_price>"
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName("symbol")
+          .setDescription("magicedenURL:<url> (see prompt)")
+          .setRequired(true)
+      )
+      .addNumberOption((opt) =>
+        opt
+          .setName("max_price")
+          .setDescription("Max price in SOL")
+          .setRequired(true)
+      ),
+    new SlashCommandBuilder()
+      .setName("mesalesuntrack")
+      .setDescription(
+        "Untrack sales for a collection. Usage: /mesalesuntrack magicedenURL:<url>"
+      )
+      .addStringOption((opt) =>
+        opt
+          .setName("symbol")
+          .setDescription("magicedenURL:<url> (see prompt)")
+          .setRequired(true)
+      ),
+    new SlashCommandBuilder()
       .setName("melist")
       .setDescription("List tracked collections"),
+    new SlashCommandBuilder()
+      .setName("metest")
+      .setDescription("Clear cache and re-alert on current listings/sales"),
     new SlashCommandBuilder()
       .setName("mecleanup")
       .setDescription("Delete my messages in this channel"),
@@ -542,8 +648,15 @@ client.once("ready", () => {
       const symbols = Object.keys(collections);
       if (symbols.length > 0) {
         const symbol = symbols[0];
-        const listings = await fetchLatestListings(symbol);
+        let listings = await fetchLatestListings(symbol);
         if (listings.length > 0) {
+          // Sort by blockTime descending to get newest listings first
+          listings.sort((a, b) => (b.blockTime || 0) - (a.blockTime || 0));
+          colorLog(
+            `[DEBUG] Sorted ${listings.length} listings by blockTime. Newest: ${listings[0].blockTime}`,
+            "cyan"
+          );
+
           const minRarity = collections[symbol].min_rarity || null;
           let shown = 0;
           const RARITY_ORDER = [
@@ -648,51 +761,77 @@ function startRoundRobinPolling() {
   }, dynamicTickMs);
 }
 
-// Poll the next collection in a round-robin fashion
+// Poll the next collection in a round-robin fashion (handles both listings and sales)
 async function pollNextCollectionRoundRobin() {
+  // ...existing code...
+
   let collections = {};
+  let salesCollections = {};
   try {
     const raw = fs.readFileSync(TRACKS_PATH, "utf8");
     const parsed = JSON.parse(raw);
     collections = parsed.collections || {};
+    salesCollections = parsed.sales_collections || {};
   } catch (e) {
     // No collections or error reading file
     return;
   }
-  const symbols = Object.keys(collections);
-  if (!symbols.length) return;
+
+  // Create a combined list of all tracking tasks (listings + sales)
+  const listingTasks = Object.keys(collections).map((symbol) => ({
+    symbol,
+    type: "listing",
+    config: collections[symbol],
+  }));
+  const salesTasks = Object.keys(salesCollections).map((symbol) => ({
+    symbol,
+    type: "sales",
+    config: salesCollections[symbol],
+  }));
+  const allTasks = [...listingTasks, ...salesTasks];
+
+  if (!allTasks.length) return;
   // Backoff logic
   if (Date.now() < globalBackoffUntil) return;
-  // Pick next collection
-  const symbol = symbols[roundRobinIdx % symbols.length];
-  let maxPrice = Number(collections[symbol].max_price);
+
+  // Pick next task
+  const task = allTasks[roundRobinIdx % allTasks.length];
+  const { symbol, type, config: collectionConfig } = task;
+
+  let maxPrice = Number(collectionConfig.max_price);
   if (!Number.isFinite(maxPrice) || maxPrice === 0) maxPrice = null;
-  const minRarity = collections[symbol].min_rarity || null;
+  const minRarity = collectionConfig.min_rarity || null;
   const filterOptions = [`maxPrice: ${maxPrice !== null ? maxPrice : "None"}`];
   if (minRarity) filterOptions.push(`minRarity: ${minRarity}`);
-  // Add more filter options here as needed (e.g., rarity)
-  console.log(
-    `[Polling] Checking collection: ${symbol} (${filterOptions.join(", ")})`
-  );
-  roundRobinIdx = (roundRobinIdx + 1) % symbols.length;
+
+  console.log(`[Polling] Checking ${type} for collection: ${symbol}`);
+  roundRobinIdx = (roundRobinIdx + 1) % allTasks.length;
+
   // Use cached supply for rarity math
   const supply = collectionSupplies[symbol] || null;
+
   try {
-    const listings = await fetchLatestListingsWithBackoff(symbol);
-    if (!listings.length) return;
+    // Fetch either listings or sales based on type
+    const activities =
+      type === "listing"
+        ? await fetchLatestListingsWithBackoff(symbol)
+        : await fetchSalesWithBackoff(symbol);
+
+    if (!activities.length) return;
     const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
-    for (const listing of listings) {
-      const id = listing.tokenMint || listing.id || JSON.stringify(listing);
-      if (seenListingIds.has(id)) continue;
+    const seenSet = type === "listing" ? seenListingIds : seenSalesIds;
+
+    for (const activity of activities) {
+      const id = activity.tokenMint || activity.id || JSON.stringify(activity);
+      if (seenSet.has(id)) continue;
       const price =
-        listing.price || listing.priceSol || listing.buyNowPrice || 0;
+        activity.price || activity.priceSol || activity.buyNowPrice || 0;
       const priceNum = Number(price);
       if (!Number.isFinite(priceNum)) continue;
       if (maxPrice !== null && priceNum > maxPrice) continue;
-      seenListingIds.add(id);
 
       // Fetch token metadata to get name and image
-      const tokenMint = listing.tokenMint || listing.mint;
+      const tokenMint = activity.tokenMint || activity.mint;
       console.log(`[DEBUG] Fetching token metadata for ${tokenMint}...`);
       const tokenData = tokenMint ? await fetchTokenMetadata(tokenMint) : null;
       console.log(
@@ -705,18 +844,39 @@ async function pollNextCollectionRoundRobin() {
 
       // Get rarity rank from cached HowRare data
       let howrare = getHowRareRank(symbol, tokenMint);
-      // Print HowRare prefix in magenta, rank in yellow
       console.log(
         `${colors.magenta}[HOWRARE] HowRare rank for ${tokenMint}: ${colors.yellow}${howrare}${colors.magenta}${colors.reset}`
       );
       let rankNum = Number(howrare);
       let rarityTier = getRarityTier(rankNum, supply);
       let rarityColor = RARITY_COLORS[rarityTier] || "#9b59ff";
+
+      // Rarity filtering logic
+      const RARITY_ORDER = [
+        "Mythic",
+        "Legendary",
+        "Epic",
+        "Rare",
+        "Uncommon",
+        "Common",
+      ];
+      if (
+        minRarity &&
+        RARITY_ORDER.indexOf(rarityTier) > RARITY_ORDER.indexOf(minRarity)
+      ) {
+        // Skip if this NFT is lower rarity than the filter
+        continue;
+      }
+
+      seenSet.add(id);
       const link = `https://magiceden.io/item-details/${tokenMint || ""}`;
       let imageUrl =
-        listing.image || tokenData?.image || tokenData?.img || null;
+        activity.image || tokenData?.image || tokenData?.img || null;
       const embed = {
-        title: `New listing in ${symbol}!`,
+        title:
+          type === "listing"
+            ? `New listing in ${symbol}!`
+            : `New sale in ${symbol}!`,
         description: [
           `Name: **${name}**`,
           `Price: **${priceNum} SOL** (<= ${maxPrice} SOL)`,
@@ -734,8 +894,8 @@ async function pollNextCollectionRoundRobin() {
       };
       if (imageUrl) embed.image = { url: imageUrl };
       await channel.send({ embeds: [embed] });
-      // Colorize new listing log in green
-      colorLog(`Sent alert for listing: ${id} (${symbol})`, "green");
+      // Colorize alert log in green
+      colorLog(`Sent alert for ${type}: ${id} (${symbol})`, "green");
     }
   } catch (err) {
     if (err && err.is429) {
@@ -801,24 +961,21 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
     // Load existing tracks
-    let tracks = {};
+    let data = { collections: {}, sales_collections: {} };
     try {
       const raw = fs.readFileSync(TRACKS_PATH, "utf8");
-      const parsed = JSON.parse(raw);
-      tracks = parsed.collections || {};
+      data = JSON.parse(raw);
+      if (!data.collections) data.collections = {};
+      if (!data.sales_collections) data.sales_collections = {};
     } catch (e) {
       console.log(`Error reading tracks.json: ${e}`);
     }
-    tracks[symbol] = { max_price: maxPrice };
-    fs.writeFileSync(
-      TRACKS_PATH,
-      JSON.stringify({ collections: tracks }, null, 2)
-    );
+    data.collections[symbol] = { max_price: maxPrice };
+    fs.writeFileSync(TRACKS_PATH, JSON.stringify(data, null, 2));
     await interaction.reply(
-      `✅ Now tracking ${symbol} with max price ${maxPrice} SOL.`
+      `✅ Now tracking listings for ${symbol} with max price ${maxPrice} SOL.`
     );
     await indexCurrentListings();
-    checkListingsAndNotify();
     return;
   }
 
@@ -833,44 +990,129 @@ client.on("interactionCreate", async (interaction) => {
       });
       return;
     }
-    let tracks = {};
+    let data = { collections: {}, sales_collections: {} };
     try {
       const raw = fs.readFileSync(TRACKS_PATH, "utf8");
-      const parsed = JSON.parse(raw);
-      tracks = parsed.collections || {};
+      data = JSON.parse(raw);
     } catch (e) {
       console.log(`Error reading tracks.json: ${e}`);
     }
-    delete tracks[symbol];
-    fs.writeFileSync(
-      TRACKS_PATH,
-      JSON.stringify({ collections: tracks }, null, 2)
+    delete data.collections[symbol];
+    fs.writeFileSync(TRACKS_PATH, JSON.stringify(data, null, 2));
+    await interaction.reply(`✅ Stopped tracking listings for ${symbol}.`);
+    return;
+  }
+
+  if (interaction.commandName === "mesalestrack") {
+    const urlOrSymbol = interaction.options.getString("symbol");
+    const maxPrice = interaction.options.getNumber("max_price");
+    const symbol = extractSymbol(urlOrSymbol);
+    if (!symbol) {
+      await interaction.reply({
+        content:
+          "Could not extract collection symbol from the provided URL. Please provide a valid Magic Eden collection URL or symbol.",
+        flags: 64,
+      });
+      return;
+    }
+    // Load existing tracks
+    let data = { collections: {}, sales_collections: {} };
+    try {
+      const raw = fs.readFileSync(TRACKS_PATH, "utf8");
+      data = JSON.parse(raw);
+      if (!data.collections) data.collections = {};
+      if (!data.sales_collections) data.sales_collections = {};
+    } catch (e) {
+      console.log(`Error reading tracks.json: ${e}`);
+    }
+    data.sales_collections[symbol] = { max_price: maxPrice };
+    fs.writeFileSync(TRACKS_PATH, JSON.stringify(data, null, 2));
+    await interaction.reply(
+      `✅ Now tracking sales for ${symbol} with max price ${maxPrice} SOL.`
     );
-    await interaction.reply(`✅ Stopped tracking ${symbol}.`);
+    await indexCurrentListings();
+    return;
+  }
+
+  if (interaction.commandName === "mesalesuntrack") {
+    const urlOrSymbol = interaction.options.getString("symbol");
+    const symbol = extractSymbol(urlOrSymbol);
+    if (!symbol) {
+      await interaction.reply({
+        content:
+          "Could not extract collection symbol from the provided URL. Please provide a valid Magic Eden collection URL or symbol.",
+        flags: 64,
+      });
+      return;
+    }
+    let data = { collections: {}, sales_collections: {} };
+    try {
+      const raw = fs.readFileSync(TRACKS_PATH, "utf8");
+      data = JSON.parse(raw);
+    } catch (e) {
+      console.log(`Error reading tracks.json: ${e}`);
+    }
+    delete data.sales_collections[symbol];
+    fs.writeFileSync(TRACKS_PATH, JSON.stringify(data, null, 2));
+    await interaction.reply(`✅ Stopped tracking sales for ${symbol}.`);
     return;
   }
 
   if (interaction.commandName === "melist") {
-    let tracks = {};
+    let data = { collections: {}, sales_collections: {} };
     try {
       const raw = fs.readFileSync(TRACKS_PATH, "utf8");
-      const parsed = JSON.parse(raw);
-      tracks = parsed.collections || {};
+      data = JSON.parse(raw);
     } catch (e) {
       console.log(`Error reading tracks.json: ${e}`);
     }
-    const symbols = Object.keys(tracks);
-    if (symbols.length === 0) {
+    const listingSymbols = Object.keys(data.collections || {});
+    const salesSymbols = Object.keys(data.sales_collections || {});
+
+    if (listingSymbols.length === 0 && salesSymbols.length === 0) {
       await interaction.reply("No collections are being tracked.");
       return;
     }
-    const trackList = symbols
-      .map((symbol) => {
-        const maxPrice = tracks[symbol].max_price;
-        return `- ${symbol}: max price ${maxPrice} SOL`;
-      })
-      .join("\n");
-    await interaction.reply(`Currently tracked collections:\n${trackList}`);
+
+    let response = "";
+    if (listingSymbols.length > 0) {
+      const listingList = listingSymbols
+        .map((symbol) => {
+          const maxPrice = data.collections[symbol].max_price;
+          return `- ${symbol}: max price ${maxPrice} SOL`;
+        })
+        .join("\n");
+      response += `**Tracking Listings:**\n${listingList}\n`;
+    }
+
+    if (salesSymbols.length > 0) {
+      const salesList = salesSymbols
+        .map((symbol) => {
+          const maxPrice = data.sales_collections[symbol].max_price;
+          return `- ${symbol}: max price ${maxPrice} SOL`;
+        })
+        .join("\n");
+      if (response) response += "\n";
+      response += `**Tracking Sales:**\n${salesList}`;
+    }
+
+    await interaction.reply(response);
+    return;
+  }
+
+  if (interaction.commandName === "metest") {
+    const beforeListings = seenListingIds.size;
+    const beforeSales = seenSalesIds.size;
+    seenListingIds.clear();
+    seenSalesIds.clear();
+    colorLog(
+      `[TEST] Cleared seen cache: ${beforeListings} listings, ${beforeSales} sales. Re-checking now...`,
+      "cyan"
+    );
+    await interaction.reply({
+      content: `🔄 Cleared seen cache: ${beforeListings} listings, ${beforeSales} sales. Will re-alert on current activities.`,
+      flags: 64,
+    });
     return;
   }
 
@@ -909,6 +1151,12 @@ client.on("messageCreate", async (message) => {
   reloadConfig();
   // Ignore messages from the bot itself
   if (message.author.id === client.user.id) return;
+
+  // Log all messages for debugging
+  console.log(
+    `[MESSAGE] Received from ${message.author.tag}: "${message.content}"`
+  );
+
   if (message.author.id !== OWNER_ID) return;
 
   // Command: /track [symbol] [max_price]
@@ -1041,6 +1289,22 @@ client.on("messageCreate", async (message) => {
           )
         );
     }
+  }
+
+  // Test command: clear seen listings and sales and re-check
+  if (message.content.trim().toLowerCase() === "/test") {
+    const beforeListings = seenListingIds.size;
+    const beforeSales = seenSalesIds.size;
+    seenListingIds.clear();
+    seenSalesIds.clear();
+    colorLog(
+      `[TEST] Cleared seen cache: ${beforeListings} listings, ${beforeSales} sales. Re-checking now...`,
+      "cyan"
+    );
+    message.reply(
+      `🔄 Cleared seen cache: ${beforeListings} listings, ${beforeSales} sales. Will re-alert on current activities.`
+    );
+    return;
   }
 });
 
