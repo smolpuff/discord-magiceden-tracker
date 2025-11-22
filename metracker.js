@@ -1,5 +1,5 @@
 // Version reference for update log
-const METRACKER_VERSION = "0.1.5";
+const METRACKER_VERSION = "0.1.6";
 
 const fs = require("fs");
 const { Client, GatewayIntentBits } = require("discord.js");
@@ -96,8 +96,111 @@ const ME_TO_HOWRARE = {
   // Add more mappings as needed
 };
 
-// Import fetchCollectionSupply
-const { fetchCollectionSupply } = require("./fetchCollectionSupply");
+// Fetch total supply for a collection from Magic Eden and HowRare (fallback), then tracks.json as last resort
+async function fetchCollectionSupply(symbol) {
+  let meFailed = false;
+  let hrFailed = false;
+
+  // Try Magic Eden first
+  try {
+    const meUrl = `https://api-mainnet.magiceden.dev/v2/collections/${encodeURIComponent(
+      symbol
+    )}`;
+    const res = await fetch(meUrl, { headers: { Accept: "application/json" } });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.stats && typeof data.stats.listedCount === "number") {
+        // Sometimes listedCount is not the full supply, but it's the best available from ME
+        if (typeof data.stats.supply === "number") return data.stats.supply;
+        if (typeof data.supply === "number") return data.supply;
+      }
+      if (typeof data.supply === "number") return data.supply;
+    }
+    meFailed = true;
+  } catch (e) {
+    meFailed = true;
+  }
+
+  // Try HowRare fallback
+  try {
+    const hrUrl = `https://api.howrare.is/v0.1/collections/${encodeURIComponent(
+      symbol
+    )}`;
+    const res = await fetch(hrUrl, { headers: { Accept: "application/json" } });
+    if (res.ok) {
+      const data = await res.json();
+      if (
+        data &&
+        data.result &&
+        data.result.collection &&
+        typeof data.result.collection.supply === "number"
+      ) {
+        return data.result.collection.supply;
+      }
+    }
+    hrFailed = true;
+  } catch (e) {
+    hrFailed = true;
+  }
+
+  // If both APIs failed, log debug before tracks.json fallback
+  if (meFailed && hrFailed) {
+    colorLog(
+      `[SUPPLY][DEBUG] Both Magic Eden and HowRare API fetches failed for ${symbol}, falling back to tracks.json override if available.`,
+      "magenta"
+    );
+  }
+
+  // Try tracks.json fallback
+  try {
+    const tracks = JSON.parse(fs.readFileSync(TRACKS_PATH, "utf8"));
+    if (
+      tracks &&
+      tracks.collections &&
+      tracks.collections[symbol] &&
+      typeof tracks.collections[symbol].supply_override === "number"
+    ) {
+      colorLog(
+        `[SUPPLY] Using tracks.json override for ${symbol}: ${tracks.collections[symbol].supply_override}`,
+        "yellow"
+      );
+      return tracks.collections[symbol].supply_override;
+    } else {
+      colorLog(
+        `[SUPPLY] No tracks.json override found for ${symbol}`,
+        "magenta"
+      );
+    }
+  } catch (e) {
+    colorLog(
+      `[SUPPLY] Error reading tracks.json override for ${symbol}: ${e}`,
+      "red"
+    );
+  }
+  return null;
+}
+
+// Fetch recent listing activities for a collection from Magic Eden
+// Returns only 'list' events (new listings), sorted by newest first
+async function fetchRecentListings(symbol, limit = 20) {
+  const url = `https://api-mainnet.magiceden.dev/v2/collections/${encodeURIComponent(
+    symbol
+  )}/activities?offset=0&limit=${limit}`;
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!res.ok) {
+    colorLog(
+      `Error fetching activities for ${symbol}: ${
+        res.status
+      } ${await res.text()}`,
+      "red"
+    );
+    return [];
+  }
+  const data = await res.json();
+  if (!Array.isArray(data)) return [];
+  // Filter for 'list' events (new listings)
+  return data.filter((event) => event.type === "list");
+}
 
 // Fetch and cache supply for all tracked collections at startup
 async function cacheAllCollectionSupplies() {
@@ -638,116 +741,123 @@ client.once("ready", () => {
     await indexCurrentListings();
     console.log("[DEBUG] Finished indexing current listings.");
 
-    // DEBUG: Post the first real listing as an embed and auto-delete after 5s (for testing)
-    // These are NOT added to seenListingIds so they can be notified again if still present
-    try {
-      const debugChannel = await client.channels.fetch(DISCORD_CHANNEL_ID);
-      const raw = fs.readFileSync(TRACKS_PATH, "utf8");
-      const parsed = JSON.parse(raw);
-      const collections = parsed.collections || {};
-      const symbols = Object.keys(collections);
-      if (symbols.length > 0) {
-        const symbol = symbols[0];
-        let listings = await fetchLatestListings(symbol);
-        if (listings.length > 0) {
-          // Sort by blockTime descending to get newest listings first
-          listings.sort((a, b) => (b.blockTime || 0) - (a.blockTime || 0));
-          colorLog(
-            `[DEBUG] Sorted ${listings.length} listings by blockTime. Newest: ${listings[0].blockTime}`,
-            "cyan"
-          );
-
-          const minRarity = collections[symbol].min_rarity || null;
-          let shown = 0;
-          const RARITY_ORDER = [
-            "Mythic",
-            "Legendary",
-            "Epic",
-            "Rare",
-            "Uncommon",
-            "Common",
-          ];
-          for (let i = 0; i < listings.length && shown < 3; i++) {
-            const listing = listings[i];
-            // Debug: print the full listing object to console
-            console.log(
-              `DEBUG: Listing #${i + 1} object: ${JSON.stringify(
-                listing,
-                null,
-                2
-              )}`
-            );
-            // Fetch token metadata from the token endpoint
-            const tokenMint = listing.tokenMint || listing.mint;
-            console.log(`[DEBUG] Fetching token metadata for ${tokenMint}...`);
-            const tokenData = tokenMint
-              ? await fetchTokenMetadata(tokenMint)
-              : null;
-            console.log(
-              `[DEBUG] Token data: ${
-                tokenData ? JSON.stringify(tokenData, null, 2) : "null"
-              }`
+    // Only show startup debug post if --debug flag is present
+    const debugMode = process.argv.includes("--debug");
+    if (debugMode) {
+      try {
+        const debugChannel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+        const raw = fs.readFileSync(TRACKS_PATH, "utf8");
+        const parsed = JSON.parse(raw);
+        const collections = parsed.collections || {};
+        const symbols = Object.keys(collections);
+        if (symbols.length > 0) {
+          const symbol = symbols[0];
+          let listings = await fetchLatestListings(symbol);
+          if (listings.length > 0) {
+            // Sort by blockTime descending to get newest listings first
+            listings.sort((a, b) => (b.blockTime || 0) - (a.blockTime || 0));
+            colorLog(
+              `[DEBUG] Sorted ${listings.length} listings by blockTime. Newest: ${listings[0].blockTime}`,
+              "cyan"
             );
 
-            const price = listing.price || 0; // Already in SOL
-            let name = tokenData?.name || "Unknown NFT";
+            const minRarity = collections[symbol].min_rarity || null;
+            let shown = 0;
+            const RARITY_ORDER = [
+              "Mythic",
+              "Legendary",
+              "Epic",
+              "Rare",
+              "Uncommon",
+              "Common",
+            ];
+            for (let i = 0; i < listings.length && shown < 3; i++) {
+              const listing = listings[i];
+              // Debug: print the full listing object to console
+              console.log(
+                `DEBUG: Listing #${i + 1} object: ${JSON.stringify(
+                  listing,
+                  null,
+                  2
+                )}`
+              );
+              // Fetch token metadata from the token endpoint
+              const tokenMint = listing.tokenMint || listing.mint;
+              console.log(
+                `[DEBUG] Fetching token metadata for ${tokenMint}...`
+              );
+              const tokenData = tokenMint
+                ? await fetchTokenMetadata(tokenMint)
+                : null;
+              console.log(
+                `[DEBUG] Token data: ${
+                  tokenData ? JSON.stringify(tokenData, null, 2) : "null"
+                }`
+              );
 
-            // Get rarity rank from cached HowRare data
-            let howrare = getHowRareRank(symbol, tokenMint);
-            // Print HowRare prefix in magenta, rank in yellow
-            console.log(
-              `${colors.magenta}[HOWRARE] HowRare rank for ${tokenMint}: ${colors.yellow}${howrare}${colors.magenta}${colors.reset}`
-            );
-            const link = `https://magiceden.io/item-details/${tokenMint || ""}`;
-            let imageUrl =
-              listing.image || tokenData?.image || tokenData?.img || null;
+              const price = listing.price || 0; // Already in SOL
+              let name = tokenData?.name || "Unknown NFT";
 
-            // Use cached supply for rarity tier
-            let supply = collectionSupplies[symbol] || null;
-            let rankNum = Number(howrare);
-            let rarityTier = getRarityTier(rankNum, supply);
-            let rarityColor = RARITY_COLORS[rarityTier] || "#9b59ff";
+              // Get rarity rank from cached HowRare data
+              let howrare = getHowRareRank(symbol, tokenMint);
+              // Print HowRare prefix in magenta, rank in yellow
+              console.log(
+                `${colors.magenta}[HOWRARE] HowRare rank for ${tokenMint}: ${colors.yellow}${howrare}${colors.magenta}${colors.reset}`
+              );
+              const link = `https://magiceden.io/item-details/${
+                tokenMint || ""
+              }`;
+              let imageUrl =
+                listing.image || tokenData?.image || tokenData?.img || null;
 
-            // Rarity filtering logic for debug/test
-            if (
-              minRarity &&
-              RARITY_ORDER.indexOf(rarityTier) > RARITY_ORDER.indexOf(minRarity)
-            ) {
-              continue;
+              // Use cached supply for rarity tier
+              let supply = collectionSupplies[symbol] || null;
+              let rankNum = Number(howrare);
+              let rarityTier = getRarityTier(rankNum, supply);
+              let rarityColor = RARITY_COLORS[rarityTier] || "#9b59ff";
+
+              // Rarity filtering logic for debug/test
+              if (
+                minRarity &&
+                RARITY_ORDER.indexOf(rarityTier) >
+                  RARITY_ORDER.indexOf(minRarity)
+              ) {
+                continue;
+              }
+
+              const embed = {
+                title: `DEBUG: Listing #${i + 1} for ${symbol}`,
+                description: [
+                  `Name: **${name}**`,
+                  `Price: **${price} SOL**`,
+                  howrare !== null && !isNaN(rankNum) && supply
+                    ? `Rarity: **${howrare}** (${rarityTier})`
+                    : howrare !== null
+                    ? `Rarity: **${howrare}**`
+                    : null,
+                  `Link: ${link}`,
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
+                url: link,
+                color: parseInt(rarityColor.replace("#", ""), 16),
+              };
+              if (imageUrl) {
+                embed.image = { url: imageUrl };
+              }
+              const msg = await debugChannel.send({ embeds: [embed] });
+              setTimeout(
+                () => msg.delete().catch(() => {}),
+                TEST_MESSAGE_DELETE_SECONDS * 1000
+              );
+              shown++;
+              if (shown >= 3) break;
             }
-
-            const embed = {
-              title: `DEBUG: Listing #${i + 1} for ${symbol}`,
-              description: [
-                `Name: **${name}**`,
-                `Price: **${price} SOL**`,
-                howrare !== null && !isNaN(rankNum) && supply
-                  ? `Rarity: **${howrare}** (${rarityTier})`
-                  : howrare !== null
-                  ? `Rarity: **${howrare}**`
-                  : null,
-                `Link: ${link}`,
-              ]
-                .filter(Boolean)
-                .join("\n"),
-              url: link,
-              color: parseInt(rarityColor.replace("#", ""), 16),
-            };
-            if (imageUrl) {
-              embed.image = { url: imageUrl };
-            }
-            const msg = await debugChannel.send({ embeds: [embed] });
-            setTimeout(
-              () => msg.delete().catch(() => {}),
-              TEST_MESSAGE_DELETE_SECONDS * 1000
-            );
-            shown++;
-            if (shown >= 3) break;
           }
         }
+      } catch (err) {
+        console.log(`DEBUG fetch error: ${err}`);
       }
-    } catch (err) {
-      console.log(`DEBUG fetch error: ${err}`);
     }
 
     startRoundRobinPolling();

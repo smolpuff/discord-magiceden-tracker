@@ -1,6 +1,6 @@
 # discord-magiceden-tracker
 
-Track Magic Eden NFT listings and sales in Discord. Price/rarity filters, unified polling, supply overrides, and rich Discord alerts.
+Track Magic Eden NFT listings and sales in Discord. Price/rarity filters, unified polling, supply overrides, and rich Discord alerts. Entirely vide-coded for fun.
 
 ## Setup
 
@@ -90,12 +90,8 @@ node metracker.js
 
 **Latest:**
 
-- v0.1.5: Integrated sales tracking into main tracker with unified round-robin polling; added `/mesalestrack`, `/mesalesuntrack`, `/metest` commands; cache only clears at startup or via `/metest` (no hourly spam)
-- v0.1.4: Added rarity filtering, added rarity coloring in notification
-- v0.1.3: Added rarity rating with HowRare API; fallback in config for max_supply
-- v0.1.2: Added max price filter
-- v0.1.1: General update
-- v0.1.0: Initial release
+- v0.1.6: Merged fetchCollectionSupply() & fetchRecentListings() into metracker.js
+- v0.1.5: Integrated sales tracking into main tracker with unified round-robin polling; added `/mesalestrack`, `/mesalesuntrack`, `/metest` commands; cache only clears at startup or via `/metest`
 
 <details>
 <summary>Full changelog</summary>
@@ -103,6 +99,12 @@ node metracker.js
 ---
 
 ### metracker.js
+
+#### 0.1.6
+
+- Merged fetchCollectionSupply() from fetchCollectionSupply.js into metracker
+- Merged fetchRecentListings() from fetchRecentListings.js into metracker
+- Added debug mode (`--debug`)
 
 #### 0.1.5
 
