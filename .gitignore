@@ -5,6 +5,14 @@ build/
 *.exe
 *.test
 *.out
+coverage.out
+cpu.prof
+mem.prof
+
+# Legacy JS artifacts still present in the repo checkout
+node_modules/
+.next/
+out/
 
 # Environment files
 .env
