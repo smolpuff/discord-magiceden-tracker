@@ -5,18 +5,23 @@ build/
 *.exe
 *.test
 *.out
+discord-magiceden-tracker
 coverage.out
 cpu.prof
 mem.prof
 
-# Legacy JS artifacts still present in the repo checkout
+# Legacy JS / frontend artifacts still present in the repo checkout
 node_modules/
 .next/
 out/
+package-lock.json
 
 # Environment files
 .env
 .env.*
+
+# Logs / local runtime files
+*.log
 
 # Editor / OS junk
 .DS_Store
