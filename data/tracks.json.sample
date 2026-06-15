@@ -2,7 +2,11 @@
   "collections": {
     "y00ts": {
       "max_price": 3.5,
-      "min_rarity": "Legendary"
+      "min_rarity": "Legendary",
+      "traits": {
+        "Background": ["Blue"],
+        "Eyes": ["Laser", "Gold"]
+      }
     },
     "mad_lads": {
       "max_price": 50

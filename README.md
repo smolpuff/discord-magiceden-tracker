@@ -24,11 +24,12 @@ You can now use your bot token, channel ID, client ID, and guild ID in your `con
 
 | Command           | Description                                                        |
 | ----------------- | ------------------------------------------------------------------ |
-| `/metrack`        | Track new listings for a collection                                |
+| `/metrack`        | Track new listings for a collection, optionally filtered by traits  |
 | `/meuntrack`      | Stop tracking listings for a collection                            |
-| `/mesalestrack`   | Track sales for a collection                                       |
+| `/mesalestrack`   | Track sales for a collection, optionally filtered by traits         |
 | `/mesalesuntrack` | Stop tracking sales for a collection                               |
 | `/melist`         | List all tracked collections (listings & sales)                    |
+| `/mestatus`       | Show tracker health, polling, backoff, and cache status            |
 | `/mecleanup`      | Delete the bot's own messages in the channel                       |
 | `/metest`         | Clear the seen cache and force re-alerts on current listings/sales |
 
@@ -50,17 +51,27 @@ cp config.json.sample config.json
 3. Start the bot:
 
 ```bash
-node metracker.js
+npm start
 ```
 
 4. In Discord, use one of the slash commands (see Commands section below) to start tracking a collection, list tracked collections, clear cache, or clean up messages.
 5. After you use a tracking command (e.g., `/metrack` or `/mesalestrack`), the bot will update and begin tracking/alerting for that collection automatically.
 6. You can add, remove, or list tracked collections at any time using the appropriate slash commands. The bot will always reflect your latest tracking configuration.
 
+Trait filters are optional on `/metrack` and `/mesalestrack`. Use semicolons between trait types and `|` for multiple accepted values:
+
+```text
+Background=Blue; Eyes=Laser|Gold
+```
+
+When trait filters are set, every configured trait type must match before the bot sends an alert.
+
+On startup, the bot prints a tracker summary in the CLI and posts summary embeds to the configured Discord channel. Each tracked listing collection gets its own embed with an NFT thumbnail, listed count from Magic Eden's current listings endpoint, current filter matches, and priority trait matches. If the configured startup page cap is hit, the listed count is shown as a minimum with `>=`.
+
 ## Features
 
 - Track listings and sales for multiple collections
-- Per-collection price and rarity filtering (HowRare.is integration)
+- Per-collection price, rarity, and trait filtering
 - Unified round-robin polling
 - Supply overrides for fallback rarity math
 - Discord alerts with NFT images, rarity tiers, and direct Magic Eden links

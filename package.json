@@ -4,10 +4,9 @@
   "private": true,
   "description": "simple node.js project to track sell/buy/listings from magiceden, sending notifications to discord",
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
-    "start": "next start",
-    "lint": "eslint"
+    "start": "node metracker.js",
+    "debug": "node metracker.js --debug",
+    "check": "node --check metracker.js"
   },
   "dependencies": {
     "discord.js": "^14.24.2",
