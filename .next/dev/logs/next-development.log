@@ -1,0 +1,3 @@
+[00:00:00.617] Server  WARN     ⚠ Duplicate page detected. app/page.js and app/page.jsx resolve to /
+[00:00:00.617] Server  WARN     ⚠ Duplicate page detected. app/page.js and app/page.jsx resolve to /
+[00:00:00.618] Server  LOG      ✓ Ready in 379ms
