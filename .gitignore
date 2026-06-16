@@ -2,6 +2,8 @@
 bin/
 dist/
 build/
+macos/
+data/tracks.json
 *.exe
 *.test
 *.out

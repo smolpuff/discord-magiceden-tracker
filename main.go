@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -23,13 +24,14 @@ import (
 
 const (
 	version                = "0.2.0-go"
-	configPath             = "config.json"
-	tracksPath             = "data/tracks.json"
+	defaultConfigPath      = "config.json"
+	defaultTracksPath      = "data/tracks.json"
 	defaultTokenTTL        = 10 * time.Minute
 	defaultMaxSeenIDs      = 5000
 	defaultStartupPageSize = 100
 	defaultStartupMaxPages = 50
 	maxPriorityRepeats     = 5
+	uiEventPrefix          = "METRACKER_EVENT "
 )
 
 var (
@@ -192,9 +194,28 @@ type startupRow struct {
 }
 
 func main() {
+	testPriorityEvent := flag.Bool("test-priority-event", false, "emit a sample priority event and exit")
+	flag.Parse()
+
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("load config: %v", err)
+	}
+
+	if *testPriorityEvent {
+		t := &tracker{
+			cfg:             cfg,
+			httpClient:      &http.Client{Timeout: 20 * time.Second},
+			seenListingSet:  map[string]struct{}{},
+			seenSalesSet:    map[string]struct{}{},
+			collectionSupply: map[string]int{},
+			howRareCache:    map[string]map[string]int{},
+			tokenMetadata:   map[string]metadataCacheEntry{},
+		}
+		if err := t.emitTestPriorityEvent(); err != nil {
+			log.Fatalf("test priority event: %v", err)
+		}
+		return
 	}
 
 	s, err := discordgo.New("Bot " + cfg.DiscordToken)
@@ -227,9 +248,104 @@ func main() {
 	select {}
 }
 
+func (t *tracker) emitTestPriorityEvent() error {
+	if err := t.cacheSupplies(); err != nil {
+		log.Printf("[test] cache supplies: %v", err)
+	}
+
+	tracks, err := loadTracks()
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	for symbol, cfg := range tracks.Collections {
+		listings, _, _, err := t.fetchCurrentListingsSnapshot(ctx, symbol)
+		if err != nil {
+			log.Printf("[test] listings snapshot for %s: %v", symbol, err)
+			continue
+		}
+		for _, activity := range listings {
+			summary := t.activityFilterSummary(symbol, cfg, activity)
+			if !summary.Matches {
+				continue
+			}
+			return t.emitTestPriorityResult(symbol, "listing", cfg, activity, summary, true)
+		}
+		if len(listings) > 0 {
+			return t.emitTestPriorityResult(symbol, "listing", cfg, listings[0], t.activityFilterSummary(symbol, cfg, listings[0]), false)
+		}
+	}
+
+	for symbol, cfg := range tracks.SalesCollections {
+		activities, err := t.fetchCollectionActivities(ctx, symbol, "buyNow", 30)
+		if err != nil {
+			log.Printf("[test] sales activity for %s: %v", symbol, err)
+			continue
+		}
+		for _, activity := range activities {
+			summary := t.activityFilterSummary(symbol, cfg, activity)
+			if !summary.Matches {
+				continue
+			}
+			return t.emitTestPriorityResult(symbol, "sale", cfg, activity, summary, true)
+		}
+		if len(activities) > 0 {
+			return t.emitTestPriorityResult(symbol, "sale", cfg, activities[0], t.activityFilterSummary(symbol, cfg, activities[0]), false)
+		}
+	}
+
+	return errors.New("no current NFT activity found in tracked collections")
+}
+
+func (t *tracker) emitTestPriorityResult(symbol, activityType string, cfg CollectionTrack, activity listingActivity, summary activitySummary, matchedFilters bool) error {
+	rarityRank := t.getActivityRarityRank(symbol, activity)
+	rarityTier := getRarityTier(rarityRank, t.getSupply(symbol))
+	link := "https://magiceden.io/item-details/" + firstNonEmpty(activity.TokenMint, activity.Mint)
+	subtitleParts := []string{symbol, activityType, priceLabelForEvent(activity)}
+	if !matchedFilters {
+		subtitleParts = append(subtitleParts, "live fallback")
+	}
+	bodyLines := []string{
+		fmt.Sprintf("%s • %s • %s", symbol, activityType, priceLabelForEvent(activity)),
+	}
+	if rarityRank > 0 {
+		bodyLines = append(bodyLines, fmt.Sprintf("Rarity: %d (%s)", rarityRank, rarityTier))
+		subtitleParts = append(subtitleParts, fmt.Sprintf("#%d", rarityRank))
+	}
+	if len(summary.MatchedTraits) > 0 {
+		bodyLines = append(bodyLines, "Matched: "+strings.Join(summary.MatchedTraits, ", "))
+	}
+	filters := describeFilters(cfg)
+	if len(filters) > 0 {
+		bodyLines = append(bodyLines, "Filters: "+strings.Join(filters, ", "))
+		if !matchedFilters {
+			bodyLines = append(bodyLines, "Filter Status: no current live item matched filters, showing latest real NFT instead")
+		}
+	}
+	bodyLines = append(bodyLines, "Link: "+link)
+
+	emitUIEvent("priority_match", t.uiEventPayload(symbol, activityType, activity, strings.Join(bodyLines, "\n"), summary.MatchedTraits, rarityRank, rarityTier, strings.Join(subtitleParts, " · ")))
+	return nil
+}
+
+func configPath() string {
+	if v := strings.TrimSpace(os.Getenv("METRACKER_CONFIG_PATH")); v != "" {
+		return v
+	}
+	return defaultConfigPath
+}
+
+func tracksPath() string {
+	if v := strings.TrimSpace(os.Getenv("METRACKER_TRACKS_PATH")); v != "" {
+		return v
+	}
+	return defaultTracksPath
+}
+
 func loadConfig() (Config, error) {
 	var cfg Config
-	raw, err := os.ReadFile(configPath)
+	raw, err := os.ReadFile(configPath())
 	if err != nil {
 		return cfg, err
 	}
@@ -533,7 +649,46 @@ func (t *tracker) processActivity(symbol, activityType string, cfg CollectionTra
 			return err
 		}
 	}
+	if isPriority {
+		body := fmt.Sprintf("%s • %s • %s", symbol, activityType, priceLabelForEvent(activity))
+		if len(traitMatch.MatchedTraits) > 0 {
+			body += "\nMatched: " + strings.Join(traitMatch.MatchedTraits, ", ")
+		}
+		rarityRank := t.getActivityRarityRank(symbol, activity)
+		rarityTier := getRarityTier(rarityRank, t.getSupply(symbol))
+		emitUIEvent("priority_match", t.uiEventPayload(symbol, activityType, activity, body, traitMatch.MatchedTraits, rarityRank, rarityTier, ""))
+	}
 	return nil
+}
+
+func (t *tracker) uiEventPayload(symbol, activityType string, activity listingActivity, body string, matchedTraits []string, rarityRank int, rarityTier, subtitle string) map[string]string {
+	payload := map[string]string{
+		"title":      activityName(activity),
+		"subtitle":   subtitle,
+		"body":       body,
+		"symbol":     symbol,
+		"activity":   activityType,
+		"nft_name":   activityName(activity),
+		"price":      priceLabelForEvent(activity),
+		"mint":       firstNonEmpty(activity.TokenMint, activity.Mint),
+		"link":       "https://magiceden.io/item-details/" + firstNonEmpty(activity.TokenMint, activity.Mint),
+		"image_url":  activityImage(activity),
+		"traits":     strings.Join(matchedTraits, ", "),
+		"rarity":     "",
+		"rarity_tier": "",
+	}
+	if rarityRank > 0 {
+		payload["rarity"] = strconv.Itoa(rarityRank)
+		payload["rarity_tier"] = rarityTier
+	}
+	if strings.TrimSpace(payload["subtitle"]) == "" {
+		parts := []string{symbol, activityType, payload["price"]}
+		if rarityRank > 0 {
+			parts = append(parts, "#"+strconv.Itoa(rarityRank))
+		}
+		payload["subtitle"] = strings.Join(parts, " · ")
+	}
+	return payload
 }
 
 func (t *tracker) fetchCollectionActivities(ctx context.Context, symbol, eventType string, limit int) ([]listingActivity, error) {
@@ -1069,7 +1224,7 @@ func (t *tracker) respond(i *discordgo.InteractionCreate, content string, epheme
 
 func loadTracks() (Tracks, error) {
 	var tracks Tracks
-	raw, err := os.ReadFile(tracksPath)
+	raw, err := os.ReadFile(tracksPath())
 	if err != nil {
 		return Tracks{Collections: map[string]CollectionTrack{}, SalesCollections: map[string]CollectionTrack{}}, nil
 	}
@@ -1097,12 +1252,16 @@ func saveTracks(tracks Tracks) error {
 		return err
 	}
 	data = append(data, '\n')
-	dir := filepath.Dir(tracksPath)
-	tmp := filepath.Join(dir, fmt.Sprintf(".%s.%d.tmp", filepath.Base(tracksPath), time.Now().UnixNano()))
+	path := tracksPath()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, fmt.Sprintf(".%s.%d.tmp", filepath.Base(path), time.Now().UnixNano()))
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, tracksPath)
+	return os.Rename(tmp, path)
 }
 
 func extractSymbol(input string) (string, bool) {
@@ -1345,6 +1504,20 @@ func activityImage(activity listingActivity) string {
 	return firstNonEmpty(activity.Extra.Img, activity.Token.Image, activity.Image, activity.Img)
 }
 
+func priceLabelForEvent(activity listingActivity) string {
+	priceNum, ok := numericValue(activity.Price)
+	if !ok {
+		priceNum, ok = numericValue(activity.PriceSol)
+	}
+	if !ok {
+		priceNum, ok = numericValue(activity.BuyNowPrice)
+	}
+	if !ok {
+		return "unknown price"
+	}
+	return fmt.Sprintf("%.4g SOL", priceNum)
+}
+
 func extractTraits(activity listingActivity) []trait {
 	if len(activity.Token.Attributes) > 0 {
 		return activity.Token.Attributes
@@ -1520,6 +1693,19 @@ func firstAny(values ...any) any {
 		}
 	}
 	return nil
+}
+
+func emitUIEvent(kind string, payload map[string]string) {
+	if payload == nil {
+		payload = map[string]string{}
+	}
+	payload["kind"] = kind
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("ui event marshal: %v", err)
+		return
+	}
+	fmt.Printf("%s%s\n", uiEventPrefix, raw)
 }
 
 func firstNonEmpty(values ...string) string {

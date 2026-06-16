@@ -9,6 +9,44 @@ Go rewrite of the Magic Eden Discord tracker. It polls Magic Eden listings and s
 - Config file: `config.json`
 - Track file: `data/tracks.json`
 
+## macOS Menu Bar App
+
+A native SwiftUI menu bar wrapper is included under [`macos/`](./macos).
+
+It bundles the Go tracker worker and gives you:
+
+- start / stop from the menu bar
+- live log window
+- Finder access to the config folder
+- macOS notifications for priority trait matches
+- a test notification action for local verification
+
+Build it with:
+
+```bash
+/bin/zsh macos/build-macos-app.sh
+```
+
+This produces:
+
+```bash
+dist/macos/Magic Eden Tracker.app
+```
+
+On first launch, the app creates its working files in:
+
+```text
+~/Library/Application Support/Magic Eden Tracker/
+```
+
+That folder contains:
+
+- `config.json`
+- `tracks.json`
+- `Logs/metracker.log`
+
+The app copies the bundled `config.json` and tracks templates into the support folder if they do not already exist. If the support folder still has a placeholder config, it is refreshed from the bundled config on launch.
+
 ## Setup
 
 1. Create a Discord bot in the Discord Developer Portal.
