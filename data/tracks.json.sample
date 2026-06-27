@@ -3,6 +3,7 @@
     "y00ts": {
       "max_price": 3.5,
       "min_rarity": "Legendary",
+      "notify_on": "priority",
       "traits": {
         "Background": ["Blue"],
         "Eyes": ["Laser", "Gold"]

@@ -1,11 +1,13 @@
 {
   "collections": {
     "great__goats": {
-      "supply_override": 9593
+      "supply_override": 9593,
+      "min_rarity": "Rare"
     },
     "morbie": {
+      "notify_on": "priority",
       "trait_match": "any",
-      "trait_alert_repeats": 3,
+      "trait_alert_repeats": 2,
       "traits": {
         "Hat": ["Wizard"],
         "Morbie": ["Gal", "Vaw"]

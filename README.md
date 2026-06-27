@@ -97,6 +97,7 @@ Background=Blue; Eyes=Laser|Gold
 - `;` separates trait types.
 - `|` means OR within one trait type.
 - `trait_match: "any"` in `tracks.json` changes cross-trait behavior from AND to OR.
+- `notify_on: "all"` or `"priority"` controls whether alerts are sent for every tracked listing/sale or only priority trait matches.
 - `trait_alert_repeats` controls repeated priority sends for matches.
 
 ## Startup Summary

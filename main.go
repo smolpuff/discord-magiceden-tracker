@@ -32,6 +32,8 @@ const (
 	defaultStartupMaxPages = 50
 	maxPriorityRepeats     = 5
 	uiEventPrefix          = "METRACKER_EVENT "
+	notifyOnAll            = "all"
+	notifyOnPriority       = "priority"
 )
 
 var (
@@ -67,6 +69,7 @@ type CollectionTrack struct {
 	SupplyOverride    *int                `json:"supply_override,omitempty"`
 	Traits            map[string][]string `json:"traits,omitempty"`
 	TraitMatch        string              `json:"trait_match,omitempty"`
+	NotifyOn          string              `json:"notify_on,omitempty"`
 	TraitAlertRepeats int                 `json:"trait_alert_repeats,omitempty"`
 }
 
@@ -77,7 +80,7 @@ type Tracks struct {
 
 type metadataCacheEntry struct {
 	CachedAt time.Time
-	Data     map[string]any
+	Data     tokenMetadataPayload
 }
 
 type pollStatus struct {
@@ -116,20 +119,20 @@ type magicEdenCollection struct {
 }
 
 type listingActivity struct {
-	ID         string `json:"id"`
-	Type       string `json:"type"`
-	TokenMint  string `json:"tokenMint"`
-	Mint       string `json:"mint"`
-	Price      any    `json:"price"`
-	PriceSol   any    `json:"priceSol"`
-	BuyNowPrice any   `json:"buyNowPrice"`
-	BlockTime  any    `json:"blockTime"`
-	Image      string `json:"image"`
-	Img        string `json:"img"`
-	Extra      struct {
-		Img         string `json:"img"`
-		HowRareRank any    `json:"howrare_rank"`
-		Image       string `json:"image"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	TokenMint   string `json:"tokenMint"`
+	Mint        string `json:"mint"`
+	Price       any    `json:"price"`
+	PriceSol    any    `json:"priceSol"`
+	BuyNowPrice any    `json:"buyNowPrice"`
+	BlockTime   any    `json:"blockTime"`
+	Image       string `json:"image"`
+	Img         string `json:"img"`
+	Extra       struct {
+		Img         string  `json:"img"`
+		HowRareRank any     `json:"howrare_rank"`
+		Image       string  `json:"image"`
 		Attributes  []trait `json:"attributes"`
 	} `json:"extra"`
 	Rarity struct {
@@ -164,6 +167,12 @@ type trait struct {
 	Type      string `json:"type"`
 	Name      string `json:"name"`
 	Value     any    `json:"value"`
+}
+
+type tokenMetadataPayload struct {
+	Name       string  `json:"name"`
+	Image      string  `json:"image"`
+	Attributes []trait `json:"attributes"`
 }
 
 type howRareCollectionResponse struct {
@@ -204,13 +213,13 @@ func main() {
 
 	if *testPriorityEvent {
 		t := &tracker{
-			cfg:             cfg,
-			httpClient:      &http.Client{Timeout: 20 * time.Second},
-			seenListingSet:  map[string]struct{}{},
-			seenSalesSet:    map[string]struct{}{},
+			cfg:              cfg,
+			httpClient:       &http.Client{Timeout: 20 * time.Second},
+			seenListingSet:   map[string]struct{}{},
+			seenSalesSet:     map[string]struct{}{},
 			collectionSupply: map[string]int{},
-			howRareCache:    map[string]map[string]int{},
-			tokenMetadata:   map[string]metadataCacheEntry{},
+			howRareCache:     map[string]map[string]int{},
+			tokenMetadata:    map[string]metadataCacheEntry{},
 		}
 		if err := t.emitTestPriorityEvent(); err != nil {
 			log.Fatalf("test priority event: %v", err)
@@ -224,9 +233,9 @@ func main() {
 	}
 
 	t := &tracker{
-		cfg:        cfg,
-		session:    s,
-		httpClient: &http.Client{Timeout: 20 * time.Second},
+		cfg:              cfg,
+		session:          s,
+		httpClient:       &http.Client{Timeout: 20 * time.Second},
 		seenListingSet:   map[string]struct{}{},
 		seenSalesSet:     map[string]struct{}{},
 		collectionSupply: map[string]int{},
@@ -611,9 +620,19 @@ func (t *tracker) processActivity(symbol, activityType string, cfg CollectionTra
 		return nil
 	}
 
+	t.hydrateActivityMetadata(context.Background(), &activity)
 	traitMatch := matchTraitFilters(extractTraits(activity), cfg.Traits, cfg.TraitMatch)
 	isPriority := len(cfg.Traits) > 0 && traitMatch.Matches
+
+	notifyOn := strings.ToLower(strings.TrimSpace(cfg.NotifyOn))
+	if notifyOn == "" {
+		notifyOn = notifyOnAll
+	}
+
 	t.seenAdd(activityType, id)
+	if notifyOn == notifyOnPriority && !isPriority {
+		return nil
+	}
 
 	embed := buildAlertEmbed(symbol, activityType, cfg, activity, howRareRank, rarityTier, traitMatch, isPriority)
 	repeats := 1
@@ -663,18 +682,18 @@ func (t *tracker) processActivity(symbol, activityType string, cfg CollectionTra
 
 func (t *tracker) uiEventPayload(symbol, activityType string, activity listingActivity, body string, matchedTraits []string, rarityRank int, rarityTier, subtitle string) map[string]string {
 	payload := map[string]string{
-		"title":      activityName(activity),
-		"subtitle":   subtitle,
-		"body":       body,
-		"symbol":     symbol,
-		"activity":   activityType,
-		"nft_name":   activityName(activity),
-		"price":      priceLabelForEvent(activity),
-		"mint":       firstNonEmpty(activity.TokenMint, activity.Mint),
-		"link":       "https://magiceden.io/item-details/" + firstNonEmpty(activity.TokenMint, activity.Mint),
-		"image_url":  activityImage(activity),
-		"traits":     strings.Join(matchedTraits, ", "),
-		"rarity":     "",
+		"title":       activityName(activity),
+		"subtitle":    subtitle,
+		"body":        body,
+		"symbol":      symbol,
+		"activity":    activityType,
+		"nft_name":    activityName(activity),
+		"price":       priceLabelForEvent(activity),
+		"mint":        firstNonEmpty(activity.TokenMint, activity.Mint),
+		"link":        "https://magiceden.io/item-details/" + firstNonEmpty(activity.TokenMint, activity.Mint),
+		"image_url":   activityImage(activity),
+		"traits":      strings.Join(matchedTraits, ", "),
+		"rarity":      "",
 		"rarity_tier": "",
 	}
 	if rarityRank > 0 {
@@ -773,6 +792,88 @@ func (t *tracker) fetchCollectionInfo(ctx context.Context, symbol string) (*magi
 		return nil, err
 	}
 	return &data, nil
+}
+
+func (t *tracker) fetchTokenMetadata(ctx context.Context, mint string) (tokenMetadataPayload, error) {
+	mint = strings.TrimSpace(mint)
+	if mint == "" {
+		return tokenMetadataPayload{}, errors.New("missing token mint")
+	}
+
+	ttl := time.Duration(t.cfg.TokenMetadataTTLMS) * time.Millisecond
+
+	t.mu.Lock()
+	if entry, ok := t.tokenMetadata[mint]; ok && time.Since(entry.CachedAt) < ttl {
+		t.mu.Unlock()
+		return entry.Data, nil
+	}
+	t.mu.Unlock()
+
+	u := fmt.Sprintf("https://api-mainnet.magiceden.dev/v2/tokens/%s", url.PathEscape(mint))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("Accept", "application/json")
+	res, err := t.httpClient.Do(req)
+	if err != nil {
+		return tokenMetadataPayload{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= 400 {
+		body, _ := io.ReadAll(res.Body)
+		return tokenMetadataPayload{}, fmt.Errorf("token %s: %d %s", mint, res.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var payload tokenMetadataPayload
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		return tokenMetadataPayload{}, err
+	}
+
+	t.mu.Lock()
+	t.tokenMetadata[mint] = metadataCacheEntry{
+		CachedAt: time.Now(),
+		Data:     payload,
+	}
+	t.mu.Unlock()
+
+	return payload, nil
+}
+
+func (t *tracker) hydrateActivityMetadata(ctx context.Context, activity *listingActivity) {
+	if activity == nil {
+		return
+	}
+	if len(extractTraits(*activity)) > 0 && activityName(*activity) != "Unknown NFT" && activityImage(*activity) != "" {
+		return
+	}
+
+	mint := firstNonEmpty(activity.TokenMint, activity.Mint)
+	if mint == "" {
+		return
+	}
+
+	payload, err := t.fetchTokenMetadata(ctx, mint)
+	if err != nil {
+		log.Printf("token metadata %s: %v", mint, err)
+		return
+	}
+
+	if strings.TrimSpace(activity.Metadata.Name) == "" {
+		activity.Metadata.Name = payload.Name
+	}
+	if strings.TrimSpace(activity.Token.Name) == "" {
+		activity.Token.Name = payload.Name
+	}
+	if strings.TrimSpace(activity.Image) == "" {
+		activity.Image = payload.Image
+	}
+	if strings.TrimSpace(activity.Token.Image) == "" {
+		activity.Token.Image = payload.Image
+	}
+	if len(activity.Metadata.Attributes) == 0 {
+		activity.Metadata.Attributes = payload.Attributes
+	}
+	if len(activity.Token.Attributes) == 0 {
+		activity.Token.Attributes = payload.Attributes
+	}
 }
 
 func (t *tracker) fetchHowRareCollection(ctx context.Context, symbol string) (map[string]int, int, error) {
@@ -917,6 +1018,12 @@ func (t *tracker) sendStartupSummary(ctx context.Context) error {
 			Filters:          describeFilters(cfg),
 		}
 		rows = append(rows, row)
+
+		if row.PriorityMatches > 0 {
+			if err := t.sendStartupPriorityAlert(ctx, symbol, cfg, currentListings); err != nil {
+				log.Printf("[startup] priority alert for %s: %v", symbol, err)
+			}
+		}
 	}
 	for symbol := range tracks.SalesCollections {
 		rows = append(rows, startupRow{
@@ -998,9 +1105,40 @@ func (t *tracker) sendStartupSummary(ctx context.Context) error {
 	return nil
 }
 
+func (t *tracker) sendStartupPriorityAlert(ctx context.Context, symbol string, cfg CollectionTrack, listings []listingActivity) error {
+	for _, activity := range listings {
+		summary := t.activityFilterSummary(symbol, cfg, activity)
+		if !summary.Priority {
+			continue
+		}
+
+		howRareRank := t.getActivityRarityRank(symbol, activity)
+		rarityTier := getRarityTier(howRareRank, t.getSupply(symbol))
+		embed := buildAlertEmbed(symbol, "listing", cfg, activity, howRareRank, rarityTier, traitMatch{
+			Matches:       true,
+			MatchedTraits: summary.MatchedTraits,
+		}, true)
+		embed.Footer = &discordgo.MessageEmbedFooter{
+			Text: "Priority match found at startup",
+		}
+
+		contentParts := []string{"STARTUP PRIORITY MATCH"}
+		if len(summary.MatchedTraits) > 0 {
+			contentParts = append(contentParts, "Matched: "+strings.Join(summary.MatchedTraits, ", "))
+		}
+
+		_, err := t.session.ChannelMessageSendComplex(t.cfg.DiscordChannelID, &discordgo.MessageSend{
+			Content: strings.Join(contentParts, " | "),
+			Embeds:  []*discordgo.MessageEmbed{embed},
+		})
+		return err
+	}
+	return nil
+}
+
 type activitySummary struct {
-	Matches      bool
-	Priority     bool
+	Matches       bool
+	Priority      bool
 	MatchedTraits []string
 }
 
@@ -1023,10 +1161,11 @@ func (t *tracker) activityFilterSummary(symbol string, cfg CollectionTrack, acti
 	if cfg.MinRarity != "" && rarityIndex(rarityTier) > rarityIndex(cfg.MinRarity) {
 		return activitySummary{}
 	}
+	t.hydrateActivityMetadata(context.Background(), &activity)
 	traitMatch := matchTraitFilters(extractTraits(activity), cfg.Traits, cfg.TraitMatch)
 	return activitySummary{
-		Matches:      true,
-		Priority:     len(cfg.Traits) > 0 && traitMatch.Matches,
+		Matches:       true,
+		Priority:      len(cfg.Traits) > 0 && traitMatch.Matches,
 		MatchedTraits: traitMatch.MatchedTraits,
 	}
 }
@@ -1312,7 +1451,7 @@ func parseTraits(raw string) (map[string][]string, error) {
 }
 
 type traitMatch struct {
-	Matches      bool
+	Matches       bool
 	MatchedTraits []string
 }
 
@@ -1380,7 +1519,12 @@ func buildAlertEmbed(symbol, activityType string, cfg CollectionTrack, activity 
 	}
 	if len(traitMatch.MatchedTraits) > 0 {
 		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   func() string { if priority { return "Priority Traits" }; return "Traits" }(),
+			Name: func() string {
+				if priority {
+					return "Priority Traits"
+				}
+				return "Traits"
+			}(),
 			Value:  truncate(strings.Join(traitMatch.MatchedTraits, "\n"), 1024),
 			Inline: false,
 		})
@@ -1398,11 +1542,16 @@ func buildAlertEmbed(symbol, activityType string, cfg CollectionTrack, activity 
 		Inline: true,
 	})
 	embed := &discordgo.MessageEmbed{
-		Title:       title,
-		Description: func() string { if priority { return "**This listing matched one of your watched traits.**" }; return "" }(),
-		URL:         link,
-		Color:       func() int { if priority { return 0xffd700 }; return 0x9b59ff }(),
-		Fields:      fields,
+		Title: title,
+		Description: func() string {
+			if priority {
+				return "**This listing matched one of your watched traits.**"
+			}
+			return ""
+		}(),
+		URL:    link,
+		Color:  rarityColor(rarityTier),
+		Fields: fields,
 		Footer: &discordgo.MessageEmbedFooter{
 			Text: func() string {
 				if priority {
@@ -1417,6 +1566,23 @@ func buildAlertEmbed(symbol, activityType string, cfg CollectionTrack, activity 
 		embed.Image = &discordgo.MessageEmbedImage{URL: image}
 	}
 	return embed
+}
+
+func rarityColor(rarityTier string) int {
+	switch strings.ToLower(strings.TrimSpace(rarityTier)) {
+	case "mythic":
+		return 0xff7a18
+	case "legendary":
+		return 0xffb700
+	case "epic":
+		return 0xa56eff
+	case "rare":
+		return 0x4c8bf5
+	case "uncommon":
+		return 0x2fbf71
+	default:
+		return 0x8e8e93
+	}
 }
 
 func (t *tracker) seenHas(activityType, id string) bool {
@@ -1729,7 +1895,7 @@ func truncate(s string, max int) string {
 }
 
 func ptrFloat(v float64) *float64 { return &v }
-func ptrInt(v int) *int          { return &v }
+func ptrInt(v int) *int           { return &v }
 
 func minInt(a, b int) int {
 	if a < b {
