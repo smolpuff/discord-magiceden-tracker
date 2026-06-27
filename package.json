@@ -5,8 +5,7 @@
   "description": "Magic Eden Discord tracker with macOS menu bar packaging",
   "scripts": {
     "build": "go build -o bin/metracker .",
-    "build:mac": "bash macos/build-macos-app.sh",
-    "test": "go test ./..."
+    "build:mac": "bash macos/build-macos-app.sh"
   },
   "license": "MIT"
 }
